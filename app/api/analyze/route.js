@@ -1,9 +1,35 @@
 import Anthropic from '@anthropic-ai/sdk'
+import {
+  isConfigured as marketIsConfigured,
+  snapshotMany,
+  getMarketNews,
+  getCompanyNews,
+} from '../../lib/marketData'
 
 export const runtime = 'nodejs'
 export const maxDuration = 60
 
 const MODEL = process.env.ANTHROPIC_MODEL || 'claude-opus-4-7'
+
+const DEFAULT_CONSENSUS_UNIVERSE = [
+  // Mega-cap tech
+  'AAPL','MSFT','GOOGL','AMZN','META','NVDA','TSLA','AVGO','ORCL','CRM','ADBE','AMD','NFLX','INTC','QCOM','CSCO','IBM','TXN',
+  // Software / cloud
+  'PLTR','SNOW','CRWD','PANW','NOW','SHOP','UBER','ABNB','SQ','PYPL','COIN','DDOG','NET','ZS','MDB','TEAM',
+  // Semis
+  'TSM','ASML','MU','LRCX','AMAT','KLAC','ARM','MRVL','ON','NXPI',
+  // Healthcare / biotech
+  'LLY','UNH','JNJ','PFE','MRK','ABBV','AMGN','TMO','DHR','VRTX','REGN','GILD','ISRG','BSX','BMY',
+  // Financials
+  'JPM','BAC','GS','MS','BLK','C','WFC','SCHW','V','MA','AXP','SPGI',
+  // Consumer
+  'WMT','COST','HD','MCD','SBUX','NKE','LULU','TJX','TGT','LOW','BKNG','CMG',
+  // Industrial / energy
+  'BA','CAT','DE','GE','LMT','RTX','HON','UNP','XOM','CVX','OXY','EOG','SLB','VST','CEG',
+  // Comm / media
+  'DIS','TMUS','VZ','T','CMCSA','SPOT','ROKU',
+]
+
 
 const PICKS_SYSTEM = `You are Intel Desk, an AI stock-picking analyst that turns raw user intelligence into actionable, structured stock picks. The user drops notes, news, theses, rumors, technical observations, and macro views. Your job is to synthesize the inputs into the most compelling investable opportunities.
 
@@ -95,16 +121,20 @@ const OPTIONS_SCHEMA = `{
   ]
 }`
 
-const CONSENSUS_SYSTEM = `You are Intel Desk's analyst-consensus aggregator. Surface stocks with the highest concentration of Strong Buy ratings from sell-side analysts, weighted by quality of coverage and recency.
+const CONSENSUS_SYSTEM = `You are Intel Desk's analyst-consensus aggregator. Surface stocks with the highest concentration of Strong Buy ratings from sell-side analysts.
+
+When a "Live Strong-Buy ranking from Finnhub" block is provided in the user message, treat it as authoritative ground truth: copy the strongBuyCount, totalAnalysts, analystTarget, and upsidePct verbatim from that block into your output for each picked ticker. Use your reasoning ONLY for the qualitative fields: thesis, catalysts, risks, your independent take, conviction.
+
+When live data is NOT provided, fall back to your training-time knowledge but lower confidence and flag the figures as approximate.
 
 For each name include:
-- Approximate Strong Buy count (and total analysts covering)
+- Strong Buy count and total analysts covering
 - Aggregate price target vs current price → upside %
 - 2-3 reasons the street is bullish
 - Key risks the bulls are downplaying
-- Whether YOU agree (independent take) and your conviction
+- Whether YOU agree and why
 
-Lean toward names with 15+ Strong Buys and meaningful upside vs current price. Mix mega-caps with under-followed mid-caps where consensus is unusually concentrated. If the user provided sector / market-cap / theme constraints, respect them.
+Mix mega-caps with under-followed mid-caps where consensus is unusually concentrated. Respect user filters.
 
 Output STRICT JSON only.`
 
@@ -154,12 +184,105 @@ function formatIntel(items) {
     .join('\n\n')
 }
 
-function buildPrompt(mode, payload) {
+function formatSnapshots(snaps) {
+  if (!snaps?.length) return '(no live data available)'
+  return snaps.map((s) => {
+    const q = s.quote
+    const r = s.recommendations
+    const t = s.priceTarget
+    const p = s.profile
+    const upside = q?.price && t?.targetMean ? (((t.targetMean - q.price) / q.price) * 100).toFixed(1) : null
+    const parts = [
+      `${s.symbol}${p?.name ? ` (${p.name})` : ''}${p?.sector ? ` · ${p.sector}` : ''}`,
+    ]
+    if (q) parts.push(`px=$${q.price?.toFixed?.(2) ?? q.price} (${q.pctChange >= 0 ? '+' : ''}${q.pctChange?.toFixed?.(2) ?? q.pctChange}%)`)
+    if (p?.marketCap) parts.push(`mcap=$${(p.marketCap / 1000).toFixed(1)}B`)
+    if (r) parts.push(`ratings: SB=${r.strongBuy} B=${r.buy} H=${r.hold} S=${r.sell} SS=${r.strongSell} (n=${r.total}, ${r.period})`)
+    if (t) parts.push(`target: mean=$${t.targetMean} hi=$${t.targetHigh} lo=$${t.targetLow} n=${t.numAnalysts}${upside ? ` upside=${upside}%` : ''}`)
+    return parts.join(' | ')
+  }).join('\n')
+}
+
+function formatCompanyNews(byTicker) {
+  const lines = []
+  for (const [tkr, items] of Object.entries(byTicker)) {
+    if (!items?.length) continue
+    lines.push(`# ${tkr} news`)
+    for (const n of items.slice(0, 5)) {
+      const when = n.datetime ? new Date(n.datetime).toISOString().slice(0, 10) : ''
+      lines.push(`- [${when}] ${n.headline}${n.summary ? ` — ${n.summary.slice(0, 180)}` : ''}`)
+    }
+  }
+  return lines.join('\n') || '(no recent news)'
+}
+
+function uniqTickers(...lists) {
+  const set = new Set()
+  for (const l of lists) {
+    if (!l) continue
+    for (const t of l) if (t) set.add(String(t).toUpperCase())
+  }
+  return [...set]
+}
+
+async function gatherLiveContext({ tickers, includeNews = true, marketNewsCategory = null }) {
+  if (!marketIsConfigured()) return { snapshots: [], companyNews: {}, marketNews: [], note: 'FINNHUB_API_KEY not configured — live market data disabled.' }
+  const out = { snapshots: [], companyNews: {}, marketNews: [], note: null }
+  try {
+    if (tickers.length) {
+      out.snapshots = await snapshotMany(tickers.slice(0, 20))
+    }
+  } catch (e) { out.note = `snapshot failed: ${e.message}` }
+  if (includeNews && tickers.length) {
+    const newsResults = await Promise.allSettled(
+      tickers.slice(0, 8).map((t) => getCompanyNews(t).then((n) => [t, n])),
+    )
+    for (const r of newsResults) {
+      if (r.status === 'fulfilled' && r.value) out.companyNews[r.value[0]] = r.value[1]
+    }
+  }
+  if (marketNewsCategory) {
+    try { out.marketNews = await getMarketNews(marketNewsCategory) } catch {}
+  }
+  return out
+}
+
+function liveBlock(ctx) {
+  const lines = []
+  if (ctx.note) lines.push(`(${ctx.note})`)
+  if (ctx.snapshots?.length) {
+    lines.push('## Live snapshot (Finnhub, real-time):')
+    lines.push(formatSnapshots(ctx.snapshots))
+  }
+  if (Object.keys(ctx.companyNews || {}).length) {
+    lines.push('\n## Recent company news:')
+    lines.push(formatCompanyNews(ctx.companyNews))
+  }
+  if (ctx.marketNews?.length) {
+    lines.push('\n## General market news headlines:')
+    for (const n of ctx.marketNews.slice(0, 10)) {
+      const when = n.datetime ? new Date(n.datetime).toISOString().slice(0, 10) : ''
+      lines.push(`- [${when}] ${n.headline}`)
+    }
+  }
+  return lines.join('\n') || '(no live market context available)'
+}
+
+async function buildPrompt(mode, payload) {
   const today = new Date().toISOString().slice(0, 10)
   if (mode === 'picks') {
     const intel = formatIntel(payload.intel)
     const filters = payload.filters || {}
+    const intelTickers = (payload.intel || []).flatMap((i) => i.tickers || [])
+    const ctx = await gatherLiveContext({
+      tickers: uniqTickers(intelTickers),
+      includeNews: true,
+      marketNewsCategory: 'general',
+    })
     return `Today: ${today}
+
+${liveBlock(ctx)}
+
 User intel feed:
 
 ${intel}
@@ -171,12 +294,24 @@ Constraints:
 - horizon bias: ${filters.horizon || 'any'}
 - notes: ${filters.notes || 'none'}
 
+When live data is present, anchor entry/target/stop on the real current price and analyst-target ranges, not estimates.
+
 Return STRICT JSON matching:
 ${PICKS_SCHEMA}`
   }
   if (mode === 'options') {
     const intel = formatIntel(payload.intel)
+    const intelTickers = (payload.intel || []).flatMap((i) => i.tickers || [])
+    const universe = uniqTickers(payload.watchlist, intelTickers)
+    const ctx = await gatherLiveContext({
+      tickers: universe,
+      includeNews: true,
+      marketNewsCategory: null,
+    })
     return `Today: ${today}
+
+${liveBlock(ctx)}
+
 Watchlist: ${payload.watchlist?.length ? payload.watchlist.join(', ') : '(use the most actionable names from intel + your knowledge)'}
 Capital: ${payload.capital || 'unspecified'}
 Risk tolerance: ${payload.risk || 'defined-risk preferred'}
@@ -188,11 +323,48 @@ Notes: ${payload.notes || 'none'}
 User intel for context:
 ${intel}
 
+When live prices are present, pick strikes relative to actual spot (e.g., 5-10% OTM means relative to the live price shown above). Set realistic monthly expirations.
+
 Return STRICT JSON matching:
 ${OPTIONS_SCHEMA}`
   }
   if (mode === 'consensus') {
+    const intelTickers = (payload.intel || []).flatMap((i) => i.tickers || [])
+    const exclude = new Set((payload.exclude || []).map((s) => s.toUpperCase()))
+    const universe = uniqTickers(intelTickers, DEFAULT_CONSENSUS_UNIVERSE).filter((t) => !exclude.has(t))
+    const ctx = await gatherLiveContext({
+      tickers: universe.slice(0, 20),
+      includeNews: false,
+      marketNewsCategory: null,
+    })
+    let liveRanking = ''
+    if (ctx.snapshots?.length) {
+      const ranked = ctx.snapshots
+        .filter((s) => s.recommendations && s.recommendations.strongBuy >= (Number(payload.minStrongBuys) || 0))
+        .map((s) => {
+          const sb = s.recommendations.strongBuy
+          const total = s.recommendations.total
+          const px = s.quote?.price
+          const tgt = s.priceTarget?.targetMean
+          const upside = px && tgt ? (((tgt - px) / px) * 100) : null
+          return { s, sb, total, px, tgt, upside }
+        })
+        .filter((r) => payload.minUpside ? (r.upside ?? -999) >= Number(payload.minUpside) : true)
+        .sort((a, b) => b.sb - a.sb)
+        .slice(0, Number(payload.limit) || 12)
+      if (ranked.length) {
+        liveRanking = '## Live Strong-Buy ranking from Finnhub (verified counts):\n' +
+          ranked.map((r) =>
+            `${r.s.symbol} | strongBuy=${r.sb}/${r.total} | px=$${r.px?.toFixed?.(2) ?? r.px} | target=$${r.tgt ?? '?'} | upside=${r.upside != null ? r.upside.toFixed(1) + '%' : '?'} | sector=${r.s.profile?.sector || '?'}`
+          ).join('\n')
+      }
+    }
     return `Today: ${today}
+
+${liveBlock(ctx)}
+
+${liveRanking}
+
 Generate the top stocks with the highest concentration of Strong Buy analyst ratings.
 
 Filters:
@@ -201,10 +373,12 @@ Filters:
 - min strong buys: ${payload.minStrongBuys || 15}
 - min upside vs current price: ${payload.minUpside || 'any'}
 - theme: ${payload.theme || 'none'}
-- exclude tickers: ${payload.exclude?.join(', ') || 'none'}
+- exclude tickers: ${[...exclude].join(', ') || 'none'}
 - limit: ${payload.limit || 12}
 
-Optional user intel (use to bias / overlay your picks but do NOT let it constrain you to only those tickers):
+If a live Strong-Buy ranking is included above, USE THOSE EXACT NUMBERS for strongBuyCount, totalAnalysts, analystTarget, and upsidePct in your output. Do not invent or estimate them. Use your reasoning for the thesis, catalysts, risks, and your independent take.
+
+Optional user intel:
 ${formatIntel(payload.intel)}
 
 Return STRICT JSON matching:
@@ -235,7 +409,7 @@ export async function POST(req) {
     else if (mode === 'options') system = OPTIONS_SYSTEM
     else if (mode === 'consensus') system = CONSENSUS_SYSTEM
     else return Response.json({ error: `Unknown mode: ${mode}` }, { status: 400 })
-    userPrompt = buildPrompt(mode, body)
+    userPrompt = await buildPrompt(mode, body)
   } catch (e) {
     return Response.json({ error: e.message }, { status: 400 })
   }

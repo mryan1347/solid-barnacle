@@ -6,6 +6,7 @@ import IntelList from './components/IntelList'
 import PicksFeed from './components/PicksFeed'
 import OptionsScanner from './components/OptionsScanner'
 import ConsensusScanner from './components/ConsensusScanner'
+import LivePanel from './components/LivePanel'
 
 const STORAGE_KEY = 'intel-desk-v1'
 
@@ -108,16 +109,18 @@ export default function Home() {
     }))
   }
 
-  const stats = useMemo(() => {
-    const tickerSet = new Set()
-    state.intel.forEach((i) => i.tickers?.forEach((t) => tickerSet.add(t)))
-    return {
-      intel: state.intel.length,
-      tickers: tickerSet.size,
-      picks: state.picks.length,
-      options: state.options.length,
-    }
-  }, [state])
+  const trackedTickers = useMemo(() => {
+    const set = new Set()
+    state.intel.forEach((i) => i.tickers?.forEach((t) => set.add(t)))
+    return [...set]
+  }, [state.intel])
+
+  const stats = useMemo(() => ({
+    intel: state.intel.length,
+    tickers: trackedTickers.length,
+    picks: state.picks.length,
+    options: state.options.length,
+  }), [state, trackedTickers])
 
   return (
     <div className="shell">
@@ -131,6 +134,10 @@ export default function Home() {
         <IntelInput onAdd={addIntel} />
 
         <div className="divider" />
+
+        <LivePanel tickers={trackedTickers} />
+
+        {trackedTickers.length > 0 && <div className="divider" />}
 
         <IntelList items={state.intel} onDelete={deleteIntel} onClear={clearIntel} />
       </aside>
