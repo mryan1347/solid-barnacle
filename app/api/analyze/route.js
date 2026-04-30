@@ -361,7 +361,15 @@ function intelDigest(intel) {
 
 export async function POST(req) {
   if (!process.env.ANTHROPIC_API_KEY) {
-    return Response.json({ error: 'ANTHROPIC_API_KEY is not configured.' }, { status: 500 })
+    return Response.json({
+      error: `ANTHROPIC_API_KEY not present in ${process.env.VERCEL_ENV || 'this'} runtime. Verify the env var is named exactly ANTHROPIC_API_KEY (not AMTHROPIC_API_KEY) and that the Production scope is ticked.`,
+      diag: {
+        vercelEnv: process.env.VERCEL_ENV || null,
+        anthropic: false,
+        finnhub: Boolean(process.env.FINNHUB_API_KEY),
+        kv: Boolean(process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN),
+      },
+    }, { status: 500 })
   }
 
   let body
