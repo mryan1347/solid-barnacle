@@ -7,6 +7,7 @@ import PicksFeed from './components/PicksFeed'
 import OptionsScanner from './components/OptionsScanner'
 import ConsensusScanner from './components/ConsensusScanner'
 import LivePanel from './components/LivePanel'
+import StatusDots from './components/StatusDots'
 
 const STORAGE_KEY = 'intel-desk-v1'
 
@@ -125,10 +126,13 @@ export default function Home() {
   return (
     <div className="shell">
       <aside className="sidebar">
-        <div className="brand">
-          <span className="brand-dot" />
-          <span className="brand-name">Intel Desk</span>
-          <span className="brand-sub">stock AI</span>
+        <div>
+          <div className="brand">
+            <span className="brand-dot" />
+            <span className="brand-name">Intel Desk</span>
+            <span className="brand-sub">stock AI</span>
+          </div>
+          <StatusDots />
         </div>
 
         <IntelInput onAdd={addIntel} />
