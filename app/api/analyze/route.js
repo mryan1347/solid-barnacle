@@ -5,19 +5,22 @@ import {
   getMarketNews,
   getCompanyNews,
 } from '../../lib/marketData'
+import { listAll } from '../../lib/store'
+import { get as cacheGet, set as cacheSet } from '../../lib/store'
 
 export const runtime = 'nodejs'
 export const maxDuration = 60
 
 const MODEL = process.env.ANTHROPIC_MODEL || 'claude-opus-4-7'
+const CACHE_TTL_S = 30 * 60 // 30 minutes — scanners don't need to re-bill on every page reload
 
-const DEFAULT_CONSENSUS_UNIVERSE = [
+const DEFAULT_UNIVERSE = [
   // Mega-cap tech
   'AAPL','MSFT','GOOGL','AMZN','META','NVDA','TSLA','AVGO','ORCL','CRM','ADBE','AMD','NFLX','INTC','QCOM','CSCO','IBM','TXN',
   // Software / cloud
   'PLTR','SNOW','CRWD','PANW','NOW','SHOP','UBER','ABNB','SQ','PYPL','COIN','DDOG','NET','ZS','MDB','TEAM',
   // Semis
-  'TSM','ASML','MU','LRCX','AMAT','KLAC','ARM','MRVL','ON','NXPI',
+  'TSM','ASML','MU','LRCX','AMAT','KLAC','ARM','MRVL','ON','NXPI','SMCI','ANET','CRDO',
   // Healthcare / biotech
   'LLY','UNH','JNJ','PFE','MRK','ABBV','AMGN','TMO','DHR','VRTX','REGN','GILD','ISRG','BSX','BMY',
   // Financials
@@ -25,39 +28,57 @@ const DEFAULT_CONSENSUS_UNIVERSE = [
   // Consumer
   'WMT','COST','HD','MCD','SBUX','NKE','LULU','TJX','TGT','LOW','BKNG','CMG',
   // Industrial / energy
-  'BA','CAT','DE','GE','LMT','RTX','HON','UNP','XOM','CVX','OXY','EOG','SLB','VST','CEG',
+  'BA','CAT','DE','GE','LMT','RTX','HON','UNP','XOM','CVX','OXY','EOG','SLB','VST','CEG','GEV','NEE','EQT',
   // Comm / media
   'DIS','TMUS','VZ','T','CMCSA','SPOT','ROKU',
+  // Picks-and-shovels candidates often hidden
+  'ETN','VRT','MOD','APLD','NBIS','IREN','CRWV','EOSE','SNDK','WDC','NTAP',
 ]
 
+const SHARED_RULES = `Output STRICT JSON only — no prose outside the JSON object.
+Pick conviction (1-10) reflects setup quality, not certainty. Be honest. Reject mediocre ideas.
+When live snapshot data is provided, anchor entry/target/stop on real prices and analyst targets — do not invent numbers.
+When a "Live ranking" block is provided, copy strongBuyCount / totalAnalysts / analystTarget / upsidePct verbatim.
+Cite intel item ids in sourceIntelIds when they drive a pick.`
 
-const PICKS_SYSTEM = `You are Intel Desk, an AI stock-picking analyst that turns raw user intelligence into actionable, structured stock picks. The user drops notes, news, theses, rumors, technical observations, and macro views. Your job is to synthesize the inputs into the most compelling investable opportunities.
+const SYSTEMS = {
+  top_picks: `You are Intel Desk, an AI portfolio strategist. Build a tight, conviction-weighted Top Picks list combining: (a) the user's intelligence layer, (b) live market data, (c) analyst consensus signals, (d) your own market knowledge. Mix categories — the list should include a couple undervalued names, 1-2 hidden gems, 1-2 momentum/breakout names, 1-2 sleeper picks-and-shovels plays, and at most one short. 7-10 names. ${SHARED_RULES}`,
+  hidden_gems: `You are Intel Desk's hidden-gem hunter. Surface small/mid-cap names the street is sleeping on: under-followed (≤15 analysts), recent positive operational momentum, special situations (spin-offs, recent IPO orphans, post-overhang re-rate setups), or cheap relative to growth. Avoid mega caps. Bias toward names with concentrated insider buying, accelerating revenue, or thesis-changing catalysts within 6 months. ${SHARED_RULES}`,
+  undervalued: `You are Intel Desk's deep-value hunter. Find names trading at meaningful discounts to fair value: large discount to mean analyst price target, low EV/EBITDA or P/FCF for the sector, or sum-of-parts dislocations. Prefer setups where the catalyst to close the gap is identifiable (margin recovery, capital return, segment monetization, regulatory clearing). Avoid value traps — flag declining moats explicitly. ${SHARED_RULES}`,
+  sleepers: `You are Intel Desk's "picks and shovels" specialist. The user is interested in indirect, non-obvious beneficiaries of secular themes — when there's a gold rush, sell shovels.
 
-You hunt for:
-- Undervalued stocks (mispriced relative to intrinsic value, mean-reverting setups, sum-of-parts dislocations)
-- Hidden gems (small/mid-caps the street is sleeping on, special situations, spin-offs, recent IPO orphans)
-- Options plays (asymmetric setups: long calls/puts on event catalysts, vertical spreads, LEAPS, cash-secured puts on quality names, covered calls)
-- Momentum (breakouts confirmed by fundamentals)
-- Contrarian (high short interest with thesis-breaking catalysts; deep value with hated narratives turning)
-- Shorts (broken stories, accounting flags, terminal-decline business models)
+For each theme present in the user's intel (or that you identify from live news), DON'T pick the obvious leader. Instead, look UP and DOWN the value chain to find:
+- Critical input suppliers the obvious winner depends on (chemicals, components, IP, materials)
+- Bottleneck infrastructure that scales whether or not specific winners emerge (power generation, cooling, transmission, water, real estate, networking, fabs)
+- Tools / instrumentation companies (the "Levi's of the gold rush")
+- Specialty equipment, testing, and certification names
+- Royalty / licensing models with asymmetric exposure
+- Ancillary service providers with high switching costs
+- Foreign listings or ADRs the US market under-prices
 
-Rules:
-- Be concrete. Real tickers. Specific catalysts with timing where possible.
-- Cite which intel items drove each pick (by id) when applicable.
-- If user-supplied intel is thin, you may still surface high-conviction ideas from your training knowledge, but flag that they are not derived from user intel.
-- Conviction (1-10) reflects setup quality, not certainty.
-- For options picks, include strategy, strike, expiry window, and breakeven.
-- Surface 5-10 picks. Quality over quantity. Reject mediocre ideas.
-- Output STRICT JSON only. No prose outside the JSON.`
+For each pick: explicitly state (1) the theme, (2) the obvious/expensive ticker everyone owns, (3) why your sleeper has comparable or better exposure with less crowded ownership, (4) what would have to be wrong for the thesis to break.
+
+7-10 sleeper picks. Quality over quantity. ${SHARED_RULES}`,
+  options: `You are Intel Desk's options scanner. Generate concrete options trade ideas given watchlist, capital, and the user's intel.
+
+Think in: IV regime (rich vs cheap), event calendar (earnings, FDA, Fed, product launches), asymmetric R/R (defined-risk longs on cheap IV with catalyst; premium-selling on rich IV in range-bound names), specific strategies (long calls/puts, vertical spreads, iron condors, calendars, diagonals, LEAPS, cash-secured puts on quality names you'd own, covered calls on holdings).
+
+For each idea give: strategy, strikes, expiry (use realistic monthly/weekly cycles), estimated debit/credit, breakeven, max loss, max profit, catalyst & timing, why this strategy over alternatives. ${SHARED_RULES}`,
+  consensus: `You are Intel Desk's analyst-consensus aggregator. Surface stocks with the highest concentration of Strong Buy ratings.
+
+When a "Live Strong-Buy ranking" block is provided, treat it as authoritative ground truth and copy strongBuyCount / totalAnalysts / analystTarget / upsidePct verbatim. Use your reasoning ONLY for thesis, catalysts, risks, and your independent take.
+
+Mix mega-caps with under-followed mid-caps where consensus is unusually concentrated. Respect user filters. ${SHARED_RULES}`,
+}
 
 const PICKS_SCHEMA = `{
-  "summary": "2-4 sentence synthesis of the intel, market posture, and what jumps out",
+  "summary": "2-4 sentence synthesis of intel, market posture, and what jumps out",
   "picks": [
     {
       "ticker": "AAPL",
       "company": "Apple Inc.",
       "sector": "Tech",
-      "type": "undervalued | hidden_gem | options | momentum | contrarian | short",
+      "type": "undervalued | hidden_gem | options | momentum | contrarian | short | sleeper",
       "conviction": 7.5,
       "thesis": "1-3 sentence why-now",
       "catalysts": ["...", "..."],
@@ -67,14 +88,18 @@ const PICKS_SCHEMA = `{
       "stop": "$170",
       "upsidePct": 30,
       "timeHorizon": "3-6mo",
-      "sourceIntelIds": ["uuid", "uuid"],
+      "theme": "AI infra / GLP-1 / etc (sleepers and theme picks only)",
+      "obviousAlternative": "the crowded ticker this is a sleeper relative to (sleepers only)",
+      "sourceIntelIds": ["uuid"],
+      "strongBuyCount": 30,
+      "totalAnalysts": 45,
+      "analystTarget": "$240",
       "option": {
-        "strategy": "long_call | long_put | bull_call_spread | cash_secured_put | covered_call | leap_call | calendar | iron_condor",
+        "strategy": "long_call | bull_call_spread | cash_secured_put | covered_call | leap_call | iron_condor",
         "strike": 200,
         "expiry": "2026-01-16",
         "premium": 4.20,
         "breakeven": 204.20,
-        "contracts": 1,
         "maxLoss": "premium paid",
         "rationale": "..."
       }
@@ -82,64 +107,8 @@ const PICKS_SCHEMA = `{
   ]
 }`
 
-const OPTIONS_SYSTEM = `You are Intel Desk's options scanner. You generate concrete options trade ideas given a watchlist, capital constraints, and the user's market view & intel.
-
-You think in terms of:
-- IV regime (rich vs cheap), event calendar (earnings, FDA, Fed, product launches)
-- Asymmetric R/R (defined-risk longs on cheap IV with a catalyst; premium-selling on rich IV in range-bound names)
-- Specific strategies: long calls/puts, vertical spreads (debit/credit), iron condors, calendars, diagonals, LEAPS, cash-secured puts on quality names you'd own, covered calls on existing holdings
-- Greeks intuition: delta as proxy for prob, theta vs gamma trade-off, vega exposure
-
-For each idea give: strategy, strikes, expiry (use realistic monthly/weekly cycles), estimated debit/credit, breakeven, max loss, max profit, catalyst & timing, why this strategy over the alternatives.
-
-Output STRICT JSON only.`
-
-const OPTIONS_SCHEMA = `{
-  "summary": "Quick read on the watchlist's options landscape and the highest-conviction setups",
-  "picks": [
-    {
-      "ticker": "NVDA",
-      "company": "Nvidia",
-      "type": "options",
-      "conviction": 8,
-      "thesis": "Why this trade now",
-      "catalysts": ["earnings 2026-02-25", "..."],
-      "risks": ["IV crush post-earnings", "..."],
-      "timeHorizon": "0-30d",
-      "option": {
-        "strategy": "bull_call_spread",
-        "strike": "180/200",
-        "expiry": "2026-02-27",
-        "premium": 6.50,
-        "breakeven": 186.50,
-        "contracts": 1,
-        "maxLoss": "$650",
-        "maxProfit": "$1350",
-        "rationale": "Defined risk into earnings; cheaper than naked call given elevated IV"
-      }
-    }
-  ]
-}`
-
-const CONSENSUS_SYSTEM = `You are Intel Desk's analyst-consensus aggregator. Surface stocks with the highest concentration of Strong Buy ratings from sell-side analysts.
-
-When a "Live Strong-Buy ranking from Finnhub" block is provided in the user message, treat it as authoritative ground truth: copy the strongBuyCount, totalAnalysts, analystTarget, and upsidePct verbatim from that block into your output for each picked ticker. Use your reasoning ONLY for the qualitative fields: thesis, catalysts, risks, your independent take, conviction.
-
-When live data is NOT provided, fall back to your training-time knowledge but lower confidence and flag the figures as approximate.
-
-For each name include:
-- Strong Buy count and total analysts covering
-- Aggregate price target vs current price → upside %
-- 2-3 reasons the street is bullish
-- Key risks the bulls are downplaying
-- Whether YOU agree and why
-
-Mix mega-caps with under-followed mid-caps where consensus is unusually concentrated. Respect user filters.
-
-Output STRICT JSON only.`
-
 const CONSENSUS_SCHEMA = `{
-  "summary": "What the street is loving right now and where consensus looks crowded vs warranted",
+  "summary": "What the street is loving and where consensus looks crowded vs warranted",
   "picks": [
     {
       "ticker": "MSFT",
@@ -151,9 +120,9 @@ const CONSENSUS_SCHEMA = `{
       "totalAnalysts": 56,
       "analystTarget": "$520",
       "upsidePct": 18,
-      "thesis": "Why the street is bullish + your independent read",
-      "catalysts": ["...", "..."],
-      "risks": ["...", "..."],
+      "thesis": "...",
+      "catalysts": ["..."],
+      "risks": ["..."],
       "timeHorizon": "6-12mo"
     }
   ]
@@ -169,36 +138,29 @@ function extractJson(text) {
 }
 
 function formatIntel(items) {
-  if (!items?.length) return '(no intel dropped yet — use your training knowledge)'
-  return items
-    .map((it) => {
-      const tickers = it.tickers?.length ? `[${it.tickers.join(', ')}]` : '[no ticker]'
-      const meta = [
-        it.kind && `kind=${it.kind}`,
-        it.source && `src=${it.source}`,
-        it.conviction != null && `userConv=${it.conviction}/10`,
-      ].filter(Boolean).join(' · ')
-      const when = new Date(it.createdAt).toISOString()
-      return `--- intel id=${it.id} ${tickers} ${meta} at=${when}\n${it.body}`
-    })
-    .join('\n\n')
+  if (!items?.length) return '(no intelligence layer entries — proceed with live data + your knowledge only)'
+  return items.map((it) => {
+    const tickers = it.tickers?.length ? `[${it.tickers.join(', ')}]` : '[no ticker]'
+    const meta = [
+      it.kind && `kind=${it.kind}`,
+      it.source && `src=${it.source}`,
+      it.conviction != null && `userConv=${it.conviction}/10`,
+    ].filter(Boolean).join(' · ')
+    const when = new Date(it.createdAt).toISOString()
+    return `--- intel id=${it.id} ${tickers} ${meta} at=${when}\n${it.body}`
+  }).join('\n\n')
 }
 
 function formatSnapshots(snaps) {
   if (!snaps?.length) return '(no live data available)'
   return snaps.map((s) => {
-    const q = s.quote
-    const r = s.recommendations
-    const t = s.priceTarget
-    const p = s.profile
+    const q = s.quote, r = s.recommendations, t = s.priceTarget, p = s.profile
     const upside = q?.price && t?.targetMean ? (((t.targetMean - q.price) / q.price) * 100).toFixed(1) : null
-    const parts = [
-      `${s.symbol}${p?.name ? ` (${p.name})` : ''}${p?.sector ? ` · ${p.sector}` : ''}`,
-    ]
+    const parts = [`${s.symbol}${p?.name ? ` (${p.name})` : ''}${p?.sector ? ` · ${p.sector}` : ''}`]
     if (q) parts.push(`px=$${q.price?.toFixed?.(2) ?? q.price} (${q.pctChange >= 0 ? '+' : ''}${q.pctChange?.toFixed?.(2) ?? q.pctChange}%)`)
     if (p?.marketCap) parts.push(`mcap=$${(p.marketCap / 1000).toFixed(1)}B`)
-    if (r) parts.push(`ratings: SB=${r.strongBuy} B=${r.buy} H=${r.hold} S=${r.sell} SS=${r.strongSell} (n=${r.total}, ${r.period})`)
-    if (t) parts.push(`target: mean=$${t.targetMean} hi=$${t.targetHigh} lo=$${t.targetLow} n=${t.numAnalysts}${upside ? ` upside=${upside}%` : ''}`)
+    if (r) parts.push(`ratings: SB=${r.strongBuy} B=${r.buy} H=${r.hold} S=${r.sell} SS=${r.strongSell} (n=${r.total})`)
+    if (t) parts.push(`target: $${t.targetMean} (n=${t.numAnalysts}${upside ? `, upside=${upside}%` : ''})`)
     return parts.join(' | ')
   }).join('\n')
 }
@@ -208,9 +170,9 @@ function formatCompanyNews(byTicker) {
   for (const [tkr, items] of Object.entries(byTicker)) {
     if (!items?.length) continue
     lines.push(`# ${tkr} news`)
-    for (const n of items.slice(0, 5)) {
+    for (const n of items.slice(0, 4)) {
       const when = n.datetime ? new Date(n.datetime).toISOString().slice(0, 10) : ''
-      lines.push(`- [${when}] ${n.headline}${n.summary ? ` — ${n.summary.slice(0, 180)}` : ''}`)
+      lines.push(`- [${when}] ${n.headline}${n.summary ? ` — ${n.summary.slice(0, 160)}` : ''}`)
     }
   }
   return lines.join('\n') || '(no recent news)'
@@ -218,21 +180,19 @@ function formatCompanyNews(byTicker) {
 
 function uniqTickers(...lists) {
   const set = new Set()
-  for (const l of lists) {
-    if (!l) continue
-    for (const t of l) if (t) set.add(String(t).toUpperCase())
-  }
+  for (const l of lists) if (l) for (const t of l) if (t) set.add(String(t).toUpperCase())
   return [...set]
 }
 
 async function gatherLiveContext({ tickers, includeNews = true, marketNewsCategory = null }) {
-  if (!marketIsConfigured()) return { snapshots: [], companyNews: {}, marketNews: [], note: 'FINNHUB_API_KEY not configured — live market data disabled.' }
+  if (!marketIsConfigured()) {
+    return { snapshots: [], companyNews: {}, marketNews: [], note: 'FINNHUB_API_KEY not configured — live market data disabled.' }
+  }
   const out = { snapshots: [], companyNews: {}, marketNews: [], note: null }
-  try {
-    if (tickers.length) {
-      out.snapshots = await snapshotMany(tickers.slice(0, 20))
-    }
-  } catch (e) { out.note = `snapshot failed: ${e.message}` }
+  if (tickers.length) {
+    try { out.snapshots = await snapshotMany(tickers.slice(0, 25)) }
+    catch (e) { out.note = `snapshot failed: ${e.message}` }
+  }
   if (includeNews && tickers.length) {
     const newsResults = await Promise.allSettled(
       tickers.slice(0, 8).map((t) => getCompanyNews(t).then((n) => [t, n])),
@@ -251,7 +211,7 @@ function liveBlock(ctx) {
   const lines = []
   if (ctx.note) lines.push(`(${ctx.note})`)
   if (ctx.snapshots?.length) {
-    lines.push('## Live snapshot (Finnhub, real-time):')
+    lines.push('## Live snapshot (Finnhub real-time):')
     lines.push(formatSnapshots(ctx.snapshots))
   }
   if (Object.keys(ctx.companyNews || {}).length) {
@@ -259,8 +219,8 @@ function liveBlock(ctx) {
     lines.push(formatCompanyNews(ctx.companyNews))
   }
   if (ctx.marketNews?.length) {
-    lines.push('\n## General market news headlines:')
-    for (const n of ctx.marketNews.slice(0, 10)) {
+    lines.push('\n## Market headlines:')
+    for (const n of ctx.marketNews.slice(0, 8)) {
       const when = n.datetime ? new Date(n.datetime).toISOString().slice(0, 10) : ''
       lines.push(`- [${when}] ${n.headline}`)
     }
@@ -268,75 +228,58 @@ function liveBlock(ctx) {
   return lines.join('\n') || '(no live market context available)'
 }
 
-async function buildPrompt(mode, payload) {
+async function buildPrompt(mode, payload, intel) {
   const today = new Date().toISOString().slice(0, 10)
-  if (mode === 'picks') {
-    const intel = formatIntel(payload.intel)
-    const filters = payload.filters || {}
-    const intelTickers = (payload.intel || []).flatMap((i) => i.tickers || [])
-    const ctx = await gatherLiveContext({
-      tickers: uniqTickers(intelTickers),
-      includeNews: true,
-      marketNewsCategory: 'general',
-    })
-    return `Today: ${today}
+  const intelTickers = (intel || []).flatMap((i) => i.tickers || [])
+  const intelText = formatIntel(intel)
 
-${liveBlock(ctx)}
-
-User intel feed:
-
-${intel}
-
-Constraints:
-- focus types: ${filters.types?.length ? filters.types.join(', ') : 'all (undervalued, hidden_gem, options, momentum, contrarian, short)'}
-- risk profile: ${filters.risk || 'balanced'}
-- capital: ${filters.capital || 'unspecified'}
-- horizon bias: ${filters.horizon || 'any'}
-- notes: ${filters.notes || 'none'}
-
-When live data is present, anchor entry/target/stop on the real current price and analyst-target ranges, not estimates.
-
-Return STRICT JSON matching:
-${PICKS_SCHEMA}`
+  if (mode === 'top_picks') {
+    const universe = uniqTickers(intelTickers, DEFAULT_UNIVERSE).slice(0, 25)
+    const ctx = await gatherLiveContext({ tickers: universe, includeNews: true, marketNewsCategory: 'general' })
+    return `Today: ${today}\n\n${liveBlock(ctx)}\n\n## Intelligence layer (user-curated research):\n${intelText}\n\nProduce 7-10 highest-conviction picks blending intel themes, live data, and your knowledge.\n\nReturn STRICT JSON matching:\n${PICKS_SCHEMA}`
   }
+
+  if (mode === 'hidden_gems') {
+    const universe = uniqTickers(intelTickers, DEFAULT_UNIVERSE).slice(0, 25)
+    const ctx = await gatherLiveContext({ tickers: universe, includeNews: true })
+    return `Today: ${today}\n\n${liveBlock(ctx)}\n\n## Intelligence layer:\n${intelText}\n\nFind 6-10 small/mid-cap hidden gems. Bias toward under-covered names. Most picks should NOT be in the live snapshot universe — surface from your knowledge of the market.\n\nReturn STRICT JSON matching:\n${PICKS_SCHEMA}`
+  }
+
+  if (mode === 'undervalued') {
+    const universe = uniqTickers(intelTickers, DEFAULT_UNIVERSE).slice(0, 25)
+    const ctx = await gatherLiveContext({ tickers: universe, includeNews: false })
+    let valueRanking = ''
+    if (ctx.snapshots?.length) {
+      const ranked = ctx.snapshots
+        .filter((s) => s.quote?.price && s.priceTarget?.targetMean)
+        .map((s) => ({ s, upside: ((s.priceTarget.targetMean - s.quote.price) / s.quote.price) * 100 }))
+        .filter((r) => r.upside >= 15)
+        .sort((a, b) => b.upside - a.upside)
+        .slice(0, 15)
+      if (ranked.length) {
+        valueRanking = '## Live discount-to-target ranking (≥15% upside, sorted):\n' +
+          ranked.map((r) => `${r.s.symbol} | px=$${r.s.quote.price?.toFixed(2)} | target=$${r.s.priceTarget.targetMean} | upside=${r.upside.toFixed(1)}% | n=${r.s.priceTarget.numAnalysts} | sector=${r.s.profile?.sector || '?'}`).join('\n')
+      }
+    }
+    return `Today: ${today}\n\n${liveBlock(ctx)}\n\n${valueRanking}\n\n## Intelligence layer:\n${intelText}\n\nIdentify 6-10 undervalued names. Use the live ranking as one input but you may add others from your knowledge. Set entry near current price, target near analyst mean, stop ~10% below entry. Flag value traps.\n\nReturn STRICT JSON matching:\n${PICKS_SCHEMA}`
+  }
+
+  if (mode === 'sleepers') {
+    const universe = uniqTickers(intelTickers, DEFAULT_UNIVERSE).slice(0, 25)
+    const ctx = await gatherLiveContext({ tickers: universe, includeNews: true, marketNewsCategory: 'general' })
+    return `Today: ${today}\n\n${liveBlock(ctx)}\n\n## Intelligence layer (the user's themes — extract gold-rush opportunities from these):\n${intelText}\n\nFor every theme present in the intel, look up/down the value chain and surface non-obvious beneficiaries. Avoid the names already crowded in the intel itself — find the second-order winners. If the intel mentions NVDA, you should be talking about power, cooling, copper, fabs, optical components, water, REITs, transformers, etc.\n\nReturn STRICT JSON matching:\n${PICKS_SCHEMA}`
+  }
+
   if (mode === 'options') {
-    const intel = formatIntel(payload.intel)
-    const intelTickers = (payload.intel || []).flatMap((i) => i.tickers || [])
     const universe = uniqTickers(payload.watchlist, intelTickers)
-    const ctx = await gatherLiveContext({
-      tickers: universe,
-      includeNews: true,
-      marketNewsCategory: null,
-    })
-    return `Today: ${today}
-
-${liveBlock(ctx)}
-
-Watchlist: ${payload.watchlist?.length ? payload.watchlist.join(', ') : '(use the most actionable names from intel + your knowledge)'}
-Capital: ${payload.capital || 'unspecified'}
-Risk tolerance: ${payload.risk || 'defined-risk preferred'}
-Strategies preferred: ${payload.strategies?.length ? payload.strategies.join(', ') : 'any'}
-Horizon: ${payload.horizon || 'any (0-30d, 30-90d, LEAPS)'}
-Bias: ${payload.bias || 'neutral — let the setup dictate direction'}
-Notes: ${payload.notes || 'none'}
-
-User intel for context:
-${intel}
-
-When live prices are present, pick strikes relative to actual spot (e.g., 5-10% OTM means relative to the live price shown above). Set realistic monthly expirations.
-
-Return STRICT JSON matching:
-${OPTIONS_SCHEMA}`
+    const ctx = await gatherLiveContext({ tickers: universe, includeNews: true })
+    return `Today: ${today}\n\n${liveBlock(ctx)}\n\nWatchlist: ${payload.watchlist?.length ? payload.watchlist.join(', ') : '(use intel + market)'}\nCapital: ${payload.capital || 'unspecified'}\nRisk: ${payload.risk || 'defined-risk preferred'}\nStrategies: ${payload.strategies?.length ? payload.strategies.join(', ') : 'any'}\nHorizon: ${payload.horizon || 'any'}\nBias: ${payload.bias || 'neutral'}\nNotes: ${payload.notes || 'none'}\n\n## Intelligence layer:\n${intelText}\n\nReturn STRICT JSON matching:\n${PICKS_SCHEMA}`
   }
+
   if (mode === 'consensus') {
-    const intelTickers = (payload.intel || []).flatMap((i) => i.tickers || [])
     const exclude = new Set((payload.exclude || []).map((s) => s.toUpperCase()))
-    const universe = uniqTickers(intelTickers, DEFAULT_CONSENSUS_UNIVERSE).filter((t) => !exclude.has(t))
-    const ctx = await gatherLiveContext({
-      tickers: universe.slice(0, 20),
-      includeNews: false,
-      marketNewsCategory: null,
-    })
+    const universe = uniqTickers(intelTickers, DEFAULT_UNIVERSE).filter((t) => !exclude.has(t)).slice(0, 25)
+    const ctx = await gatherLiveContext({ tickers: universe, includeNews: false })
     let liveRanking = ''
     if (ctx.snapshots?.length) {
       const ranked = ctx.snapshots
@@ -353,66 +296,49 @@ ${OPTIONS_SCHEMA}`
         .sort((a, b) => b.sb - a.sb)
         .slice(0, Number(payload.limit) || 12)
       if (ranked.length) {
-        liveRanking = '## Live Strong-Buy ranking from Finnhub (verified counts):\n' +
-          ranked.map((r) =>
-            `${r.s.symbol} | strongBuy=${r.sb}/${r.total} | px=$${r.px?.toFixed?.(2) ?? r.px} | target=$${r.tgt ?? '?'} | upside=${r.upside != null ? r.upside.toFixed(1) + '%' : '?'} | sector=${r.s.profile?.sector || '?'}`
-          ).join('\n')
+        liveRanking = '## Live Strong-Buy ranking (Finnhub, verified counts):\n' +
+          ranked.map((r) => `${r.s.symbol} | strongBuy=${r.sb}/${r.total} | px=$${r.px?.toFixed?.(2) ?? r.px} | target=$${r.tgt ?? '?'} | upside=${r.upside != null ? r.upside.toFixed(1) + '%' : '?'} | sector=${r.s.profile?.sector || '?'}`).join('\n')
       }
     }
-    return `Today: ${today}
-
-${liveBlock(ctx)}
-
-${liveRanking}
-
-Generate the top stocks with the highest concentration of Strong Buy analyst ratings.
-
-Filters:
-- sector: ${payload.sector || 'any'}
-- market cap: ${payload.marketCap || 'any'}
-- min strong buys: ${payload.minStrongBuys || 15}
-- min upside vs current price: ${payload.minUpside || 'any'}
-- theme: ${payload.theme || 'none'}
-- exclude tickers: ${[...exclude].join(', ') || 'none'}
-- limit: ${payload.limit || 12}
-
-If a live Strong-Buy ranking is included above, USE THOSE EXACT NUMBERS for strongBuyCount, totalAnalysts, analystTarget, and upsidePct in your output. Do not invent or estimate them. Use your reasoning for the thesis, catalysts, risks, and your independent take.
-
-Optional user intel:
-${formatIntel(payload.intel)}
-
-Return STRICT JSON matching:
-${CONSENSUS_SCHEMA}`
+    return `Today: ${today}\n\n${liveBlock(ctx)}\n\n${liveRanking}\n\nFilters: sector=${payload.sector || 'any'} | mcap=${payload.marketCap || 'any'} | minSB=${payload.minStrongBuys || 15} | minUpside=${payload.minUpside || 'any'} | theme=${payload.theme || 'none'} | exclude=${[...exclude].join(', ') || 'none'} | limit=${payload.limit || 12}\n\n## Intelligence layer:\n${intelText}\n\nReturn STRICT JSON matching:\n${CONSENSUS_SCHEMA}`
   }
+
   throw new Error(`Unknown mode: ${mode}`)
+}
+
+function cacheKey(mode, payload, intelHash) {
+  return `scan:${mode}:${intelHash}:${JSON.stringify(payload || {})}`
+}
+
+function intelDigest(intel) {
+  return `${intel.length}:${intel.map((i) => i.id).slice(0, 50).join(',')}`
 }
 
 export async function POST(req) {
   if (!process.env.ANTHROPIC_API_KEY) {
-    return Response.json(
-      { error: 'ANTHROPIC_API_KEY is not configured. Add it to your environment (Vercel → Project Settings → Environment Variables) and redeploy.' },
-      { status: 500 },
-    )
+    return Response.json({ error: 'ANTHROPIC_API_KEY is not configured.' }, { status: 500 })
   }
 
   let body
-  try {
-    body = await req.json()
-  } catch {
-    return Response.json({ error: 'Invalid JSON body' }, { status: 400 })
+  try { body = await req.json() } catch { return Response.json({ error: 'Invalid JSON body' }, { status: 400 }) }
+
+  const mode = body.mode || 'top_picks'
+  const fresh = Boolean(body.fresh)
+  const system = SYSTEMS[mode]
+  if (!system) return Response.json({ error: `Unknown mode: ${mode}` }, { status: 400 })
+
+  // Always pull intel from the backend store. Client doesn't need to send it.
+  const intel = await listAll('intel:v1')
+  const ckey = cacheKey(mode, body.payload || {}, intelDigest(intel))
+
+  if (!fresh) {
+    const cached = await cacheGet(ckey)
+    if (cached) return Response.json({ ...cached, cached: true })
   }
 
-  const mode = body.mode || 'picks'
-  let system, userPrompt
-  try {
-    if (mode === 'picks') system = PICKS_SYSTEM
-    else if (mode === 'options') system = OPTIONS_SYSTEM
-    else if (mode === 'consensus') system = CONSENSUS_SYSTEM
-    else return Response.json({ error: `Unknown mode: ${mode}` }, { status: 400 })
-    userPrompt = await buildPrompt(mode, body)
-  } catch (e) {
-    return Response.json({ error: e.message }, { status: 400 })
-  }
+  let userPrompt
+  try { userPrompt = await buildPrompt(mode, body.payload || {}, intel) }
+  catch (e) { return Response.json({ error: e.message }, { status: 400 }) }
 
   const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
 
@@ -420,44 +346,30 @@ export async function POST(req) {
     const resp = await client.messages.create({
       model: MODEL,
       max_tokens: 4096,
-      system: [
-        { type: 'text', text: system, cache_control: { type: 'ephemeral' } },
-      ],
+      system: [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }],
       messages: [{ role: 'user', content: userPrompt }],
     })
-
-    const text = resp.content
-      .filter((b) => b.type === 'text')
-      .map((b) => b.text)
-      .join('\n')
-
+    const text = resp.content.filter((b) => b.type === 'text').map((b) => b.text).join('\n')
     let parsed
-    try {
-      parsed = extractJson(text)
-    } catch (e) {
-      return Response.json(
-        { error: 'Model did not return valid JSON', raw: text },
-        { status: 502 },
-      )
-    }
+    try { parsed = extractJson(text) }
+    catch { return Response.json({ error: 'Model did not return valid JSON', raw: text }, { status: 502 }) }
 
     const picks = (parsed.picks || []).map((p) => ({
       id: crypto.randomUUID(),
       ...p,
-      type: p.type || (mode === 'options' ? 'options' : 'undervalued'),
+      type: p.type || (mode === 'options' ? 'options' : mode === 'sleepers' ? 'sleeper' : mode === 'hidden_gems' ? 'hidden_gem' : 'undervalued'),
     }))
 
-    return Response.json({
+    const result = {
       mode,
       summary: parsed.summary || '',
       picks,
       generatedAt: Date.now(),
-      usage: resp.usage,
-    })
+      intelCount: intel.length,
+    }
+    await cacheSet(ckey, result, { ttl: CACHE_TTL_S })
+    return Response.json(result)
   } catch (e) {
-    return Response.json(
-      { error: e?.message || 'Anthropic request failed' },
-      { status: 500 },
-    )
+    return Response.json({ error: e?.message || 'Anthropic request failed' }, { status: 500 })
   }
 }

@@ -1,222 +1,314 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
-import IntelInput from './components/IntelInput'
-import IntelList from './components/IntelList'
+import { useEffect, useMemo, useState, useCallback } from 'react'
+import IntelDrawer from './components/IntelDrawer'
 import PicksFeed from './components/PicksFeed'
 import OptionsScanner from './components/OptionsScanner'
 import ConsensusScanner from './components/ConsensusScanner'
 import LivePanel from './components/LivePanel'
 import StatusDots from './components/StatusDots'
 
-const STORAGE_KEY = 'intel-desk-v1'
-
-const TABS = [
-  { key: 'picks', label: 'Picks' },
-  { key: 'options', label: 'Options Scanner' },
-  { key: 'consensus', label: 'Strong Buy Consensus' },
+const SCANNERS = [
+  { key: 'top_picks', label: 'Top Picks', auto: true },
+  { key: 'sleepers', label: 'Sleepers', auto: true },
+  { key: 'hidden_gems', label: 'Hidden Gems', auto: true },
+  { key: 'undervalued', label: 'Undervalued', auto: true },
+  { key: 'consensus', label: 'Strong Buy', auto: true },
+  { key: 'options', label: 'Options', auto: false },
 ]
 
-const initialState = {
-  intel: [],
-  picks: [],
-  picksSummary: '',
-  picksAt: null,
-  options: [],
-  optionsSummary: '',
-  optionsAt: null,
-  consensus: [],
-  consensusSummary: '',
-  consensusAt: null,
-}
+const RESULT_CACHE_KEY = 'intel-desk-results-v2'
 
 export default function Home() {
+  const [results, setResults] = useState({})
+  const [busy, setBusy] = useState({})
+  const [errors, setErrors] = useState({})
+  const [tab, setTab] = useState('top_picks')
+  const [intel, setIntel] = useState([])
+  const [drawerOpen, setDrawerOpen] = useState(false)
   const [hydrated, setHydrated] = useState(false)
-  const [state, setState] = useState(initialState)
-  const [tab, setTab] = useState('picks')
-  const [busy, setBusy] = useState(null)
-  const [error, setError] = useState('')
 
+  // Hydrate cached scanner results from localStorage so reloads are instant.
   useEffect(() => {
     try {
-      const raw = localStorage.getItem(STORAGE_KEY)
-      if (raw) setState({ ...initialState, ...JSON.parse(raw) })
+      const raw = localStorage.getItem(RESULT_CACHE_KEY)
+      if (raw) setResults(JSON.parse(raw))
     } catch {}
     setHydrated(true)
   }, [])
 
   useEffect(() => {
     if (!hydrated) return
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)) } catch {}
-  }, [state, hydrated])
+    try { localStorage.setItem(RESULT_CACHE_KEY, JSON.stringify(results)) } catch {}
+  }, [results, hydrated])
 
-  const addIntel = (item) => setState((s) => ({ ...s, intel: [item, ...s.intel] }))
-  const deleteIntel = (id) => setState((s) => ({ ...s, intel: s.intel.filter((i) => i.id !== id) }))
-  const clearIntel = () => {
-    if (!confirm('Clear all intel?')) return
-    setState((s) => ({ ...s, intel: [] }))
-  }
+  const refreshIntel = useCallback(async () => {
+    try {
+      const res = await fetch('/api/intel')
+      const data = await res.json()
+      if (res.ok) setIntel(data.items || [])
+    } catch {}
+  }, [])
 
-  const callAnalyze = async (mode, payload) => {
-    setBusy(mode)
-    setError('')
+  useEffect(() => { refreshIntel() }, [refreshIntel])
+
+  const runScan = useCallback(async (mode, payload = {}, fresh = false) => {
+    setBusy((b) => ({ ...b, [mode]: true }))
+    setErrors((e) => ({ ...e, [mode]: '' }))
     try {
       const res = await fetch('/api/analyze', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mode, ...payload, intel: state.intel }),
+        body: JSON.stringify({ mode, payload, fresh }),
       })
       const data = await res.json()
-      if (!res.ok) throw new Error(data.error || 'Request failed')
+      if (!res.ok) throw new Error(data.error || 'Scan failed')
+      setResults((r) => ({ ...r, [mode]: data }))
       return data
     } catch (e) {
-      setError(e.message)
+      setErrors((er) => ({ ...er, [mode]: e.message }))
       return null
     } finally {
-      setBusy(null)
+      setBusy((b) => ({ ...b, [mode]: false }))
     }
-  }
+  }, [])
 
-  const generatePicks = async () => {
-    const data = await callAnalyze('picks', {})
-    if (!data) return
-    setState((s) => ({
-      ...s,
-      picks: data.picks || [],
-      picksSummary: data.summary || '',
-      picksAt: data.generatedAt,
-    }))
-  }
-
-  const runOptions = async (filters) => {
-    const data = await callAnalyze('options', filters)
-    if (!data) return
-    setState((s) => ({
-      ...s,
-      options: data.picks || [],
-      optionsSummary: data.summary || '',
-      optionsAt: data.generatedAt,
-    }))
-  }
-
-  const runConsensus = async (filters) => {
-    const data = await callAnalyze('consensus', filters)
-    if (!data) return
-    setState((s) => ({
-      ...s,
-      consensus: data.picks || [],
-      consensusSummary: data.summary || '',
-      consensusAt: data.generatedAt,
-    }))
-  }
+  // Auto-load every default scanner on mount (server-side cache makes this cheap).
+  useEffect(() => {
+    if (!hydrated) return
+    for (const s of SCANNERS) {
+      if (!s.auto) continue
+      if (results[s.key]?.picks?.length) continue
+      runScan(s.key)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hydrated])
 
   const trackedTickers = useMemo(() => {
     const set = new Set()
-    state.intel.forEach((i) => i.tickers?.forEach((t) => set.add(t)))
+    intel.forEach((i) => i.tickers?.forEach((t) => set.add(t)))
     return [...set]
-  }, [state.intel])
+  }, [intel])
 
-  const stats = useMemo(() => ({
-    intel: state.intel.length,
-    tickers: trackedTickers.length,
-    picks: state.picks.length,
-    options: state.options.length,
-  }), [state, trackedTickers])
+  const onIntelAdded = async () => {
+    await refreshIntel()
+    // Intel changed — drop scanner caches client-side; server cache key
+    // includes intel digest so next scan will be fresh anyway.
+    setResults({})
+  }
+
+  const current = results[tab]
+  const meta = SCANNERS.find((s) => s.key === tab)
 
   return (
-    <div className="shell">
-      <aside className="sidebar">
-        <div>
-          <div className="brand">
-            <span className="brand-dot" />
-            <span className="brand-name">Intel Desk</span>
-            <span className="brand-sub">stock AI</span>
-          </div>
-          <StatusDots />
-        </div>
-
-        <IntelInput onAdd={addIntel} />
-
-        <div className="divider" />
-
-        <LivePanel tickers={trackedTickers} />
-
-        {trackedTickers.length > 0 && <div className="divider" />}
-
-        <IntelList items={state.intel} onDelete={deleteIntel} onClear={clearIntel} />
-      </aside>
-
-      <main className="main">
-        <div className="header">
+    <div className="shell shell-mobile">
+      <header className="topbar">
+        <div className="topbar-left">
+          <span className="brand-dot" />
           <div>
-            <h1>Stock intelligence</h1>
-            <p>Drop intel on the left. Generate picks, scan options, or pull analyst consensus.</p>
+            <div className="brand-name">Intel Desk</div>
+            <StatusDots />
           </div>
-          <div className="header-actions">
-            {tab === 'picks' && (
-              <button className="btn btn-primary" onClick={generatePicks} disabled={busy === 'picks'}>
-                {busy === 'picks' ? <><span className="spinner" />Synthesizing...</> : 'Generate picks'}
-              </button>
+        </div>
+        <div className="topbar-right">
+          <button
+            className="btn"
+            onClick={() => runScan(tab, {}, true)}
+            disabled={busy[tab]}
+            title="Refresh this scanner with fresh data"
+          >
+            {busy[tab] ? '↻…' : '↻'}
+          </button>
+          <button className="btn btn-primary" onClick={() => setDrawerOpen(true)}>
+            Intel · {intel.length}
+          </button>
+        </div>
+      </header>
+
+      <nav className="tabbar">
+        {SCANNERS.map((s) => (
+          <button
+            key={s.key}
+            className={`tab ${tab === s.key ? 'active' : ''}`}
+            onClick={() => setTab(s.key)}
+          >
+            {s.label}
+            {results[s.key]?.picks?.length > 0 && (
+              <span className="tab-count">{results[s.key].picks.length}</span>
             )}
-          </div>
-        </div>
+          </button>
+        ))}
+      </nav>
 
-        <div className="stats">
-          <div className="stat">
-            <div className="stat-label">Intel items</div>
-            <div className="stat-value">{stats.intel}</div>
-          </div>
-          <div className="stat">
-            <div className="stat-label">Tickers tracked</div>
-            <div className="stat-value">{stats.tickers}</div>
-          </div>
-          <div className="stat">
-            <div className="stat-label">Active picks</div>
-            <div className="stat-value">{stats.picks}</div>
-          </div>
-          <div className="stat">
-            <div className="stat-label">Options ideas</div>
-            <div className="stat-value">{stats.options}</div>
-          </div>
-        </div>
-
-        {error && <div className="banner error">⚠ {error}</div>}
-
-        <div className="filter-bar" style={{ marginBottom: 18 }}>
-          {TABS.map((t) => (
-            <button
-              key={t.key}
-              type="button"
-              className={`filter-pill ${tab === t.key ? 'active' : ''}`}
-              onClick={() => setTab(t.key)}
-            >
-              {t.label}
-            </button>
-          ))}
-        </div>
-
-        {tab === 'picks' && (
-          <PicksFeed picks={state.picks} summary={state.picksSummary} generatedAt={state.picksAt} />
+      <main className="main main-mobile">
+        {trackedTickers.length > 0 && (
+          <details className="livewrap">
+            <summary>Live · {trackedTickers.length} ticker{trackedTickers.length === 1 ? '' : 's'}</summary>
+            <LivePanel tickers={trackedTickers} />
+          </details>
         )}
 
-        {tab === 'options' && (
-          <div style={{ display: 'grid', gap: 24 }}>
-            <section className="pick" style={{ padding: 18 }}>
-              <OptionsScanner onScan={runOptions} scanning={busy === 'options'} />
-            </section>
-            <PicksFeed picks={state.options} summary={state.optionsSummary} generatedAt={state.optionsAt} />
+        {tab === 'options' ? (
+          <section className="card">
+            <OptionsScanner
+              onScan={(payload) => runScan('options', payload, true)}
+              scanning={busy.options}
+            />
+          </section>
+        ) : tab === 'consensus' && !current?.picks?.length ? (
+          <section className="card">
+            <ConsensusScanner
+              onScan={(payload) => runScan('consensus', payload, true)}
+              scanning={busy.consensus}
+            />
+          </section>
+        ) : null}
+
+        {errors[tab] && <div className="banner error">⚠ {errors[tab]}</div>}
+
+        {busy[tab] && !current?.picks?.length ? (
+          <div className="empty"><span className="spinner" />Scanning {meta?.label.toLowerCase()}…</div>
+        ) : current?.picks?.length ? (
+          <PicksFeed
+            picks={current.picks}
+            summary={current.summary}
+            generatedAt={current.generatedAt}
+          />
+        ) : (
+          <div className="empty">
+            {tab === 'options'
+              ? 'Configure parameters above and run an options scan.'
+              : 'No picks yet — tap ↻ to run.'}
           </div>
         )}
 
-        {tab === 'consensus' && (
-          <div style={{ display: 'grid', gap: 24 }}>
-            <section className="pick" style={{ padding: 18 }}>
-              <ConsensusScanner onScan={runConsensus} scanning={busy === 'consensus'} />
-            </section>
-            <PicksFeed picks={state.consensus} summary={state.consensusSummary} generatedAt={state.consensusAt} />
+        {current?.cached && (
+          <div className="meta-line">
+            Cached. Tap ↻ for fresh data. Intel: {current.intelCount ?? intel.length} items.
           </div>
         )}
       </main>
+
+      {drawerOpen && (
+        <IntelDrawer
+          intel={intel}
+          onClose={() => setDrawerOpen(false)}
+          onChange={onIntelAdded}
+        />
+      )}
+
+      <style jsx global>{`
+        .shell-mobile {
+          display: flex;
+          flex-direction: column;
+          min-height: 100vh;
+        }
+        .topbar {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          padding: 12px 16px;
+          background: var(--bg-elev);
+          border-bottom: 1px solid var(--border);
+          position: sticky;
+          top: 0;
+          z-index: 10;
+          gap: 10px;
+        }
+        .topbar-left {
+          display: flex;
+          align-items: center;
+          gap: 10px;
+        }
+        .topbar-right {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+        }
+        .tabbar {
+          display: flex;
+          overflow-x: auto;
+          gap: 4px;
+          padding: 8px 12px;
+          background: var(--bg);
+          border-bottom: 1px solid var(--border);
+          position: sticky;
+          top: 57px;
+          z-index: 9;
+          -webkit-overflow-scrolling: touch;
+        }
+        .tabbar::-webkit-scrollbar { display: none; }
+        .tab {
+          flex-shrink: 0;
+          background: var(--bg-elev);
+          border: 1px solid var(--border);
+          color: var(--text-dim);
+          padding: 7px 14px;
+          font-size: 13px;
+          font-weight: 500;
+          border-radius: 999px;
+          white-space: nowrap;
+          display: inline-flex;
+          align-items: center;
+          gap: 6px;
+        }
+        .tab.active {
+          background: rgba(52,211,153,0.1);
+          border-color: var(--accent-dim);
+          color: var(--accent);
+        }
+        .tab-count {
+          background: var(--border);
+          color: var(--text-dim);
+          font-size: 10.5px;
+          padding: 1px 6px;
+          border-radius: 999px;
+          font-family: var(--mono);
+        }
+        .tab.active .tab-count {
+          background: var(--accent-dim);
+          color: var(--accent);
+        }
+        .main-mobile {
+          padding: 16px 14px 32px;
+          max-width: 900px;
+          margin: 0 auto;
+          width: 100%;
+        }
+        .card {
+          background: var(--bg-elev);
+          border: 1px solid var(--border);
+          border-radius: 10px;
+          padding: 14px;
+          margin-bottom: 14px;
+        }
+        .livewrap {
+          background: var(--bg-elev);
+          border: 1px solid var(--border);
+          border-radius: 10px;
+          padding: 6px 12px 0;
+          margin-bottom: 14px;
+        }
+        .livewrap summary {
+          cursor: pointer;
+          font-size: 11px;
+          letter-spacing: 0.08em;
+          text-transform: uppercase;
+          color: var(--text-faint);
+          padding: 6px 0;
+          user-select: none;
+        }
+        .livewrap[open] { padding-bottom: 12px; }
+        .meta-line {
+          margin-top: 14px;
+          color: var(--text-faint);
+          font-size: 11px;
+          text-align: center;
+        }
+        @media (min-width: 720px) {
+          .main-mobile { padding: 24px 28px 40px; }
+        }
+      `}</style>
     </div>
   )
 }

@@ -31,6 +31,9 @@ html, body {
   font-size: 14px;
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  overscroll-behavior-y: none;
 }
 
 button {
@@ -44,11 +47,13 @@ textarea, input, select {
   color: var(--text);
   border: 1px solid var(--border);
   border-radius: 6px;
-  padding: 10px 12px;
-  font-size: 13px;
+  padding: 11px 12px;
+  font-size: 16px; /* >=16px prevents iOS zoom on focus */
   outline: none;
   transition: border-color 0.15s;
   width: 100%;
+  -webkit-appearance: none;
+  appearance: none;
 }
 
 textarea:focus, input:focus, select:focus {
@@ -70,10 +75,12 @@ textarea {
   color: var(--text);
   border: 1px solid var(--border-strong);
   border-radius: 6px;
-  padding: 8px 14px;
-  font-size: 13px;
+  padding: 10px 14px;
+  font-size: 14px;
   font-weight: 500;
   transition: all 0.15s;
+  min-height: 38px;
+  -webkit-tap-highlight-color: transparent;
 }
 .btn:hover { background: #1d2533; border-color: #3b4860; }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
