@@ -7,9 +7,11 @@ import OptionsScanner from './components/OptionsScanner'
 import ConsensusScanner from './components/ConsensusScanner'
 import LivePanel from './components/LivePanel'
 import StatusDots from './components/StatusDots'
+import ThemeCard from './components/ThemeCard'
 
 const SCANNERS = [
   { key: 'top_picks', label: 'Top Picks', auto: true },
+  { key: 'themes', label: 'Themes', auto: true },
   { key: 'sleepers', label: 'Sleepers', auto: true },
   { key: 'hidden_gems', label: 'Hidden Gems', auto: true },
   { key: 'undervalued', label: 'Undervalued', auto: true },
@@ -169,11 +171,27 @@ export default function Home() {
         {busy[tab] && !current?.picks?.length ? (
           <div className="empty"><span className="spinner" />Scanning {meta?.label.toLowerCase()}…</div>
         ) : current?.picks?.length ? (
-          <PicksFeed
-            picks={current.picks}
-            summary={current.summary}
-            generatedAt={current.generatedAt}
-          />
+          tab === 'themes' ? (
+            <div>
+              {current.summary && (
+                <div className="summary">
+                  <div className="summary-label">
+                    Theme synthesis · {new Date(current.generatedAt).toLocaleString()}
+                  </div>
+                  {current.summary}
+                </div>
+              )}
+              {current.picks.map((t) => (
+                <ThemeCard key={t.id} theme={t} onAddedToIntel={refreshIntel} />
+              ))}
+            </div>
+          ) : (
+            <PicksFeed
+              picks={current.picks}
+              summary={current.summary}
+              generatedAt={current.generatedAt}
+            />
+          )
         ) : (
           <div className="empty">
             {tab === 'options'

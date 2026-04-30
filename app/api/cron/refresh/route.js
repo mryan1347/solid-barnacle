@@ -18,7 +18,7 @@ import { listAll } from '../../../lib/store'
 export const runtime = 'nodejs'
 export const maxDuration = 300
 
-const SCANNERS = ['top_picks', 'hidden_gems', 'undervalued', 'sleepers', 'consensus']
+const SCANNERS = ['top_picks', 'hidden_gems', 'undervalued', 'sleepers', 'consensus', 'themes']
 
 function authorized(req) {
   if (!process.env.CRON_SECRET) return true

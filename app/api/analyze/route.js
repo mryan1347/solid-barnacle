@@ -69,6 +69,20 @@ For each idea give: strategy, strikes, expiry (use realistic monthly/weekly cycl
 When a "Live Strong-Buy ranking" block is provided, treat it as authoritative ground truth and copy strongBuyCount / totalAnalysts / analystTarget / upsidePct verbatim. Use your reasoning ONLY for thesis, catalysts, risks, and your independent take.
 
 Mix mega-caps with under-followed mid-caps where consensus is unusually concentrated. Respect user filters. ${SHARED_RULES}`,
+
+  themes: `You are Intel Desk's theme scout. Read recent market news and identify emerging investable narratives — secular shifts that aren't yet fully priced in but are showing up across multiple data points.
+
+For each theme:
+- Name it crisply (3-6 words)
+- 2-3 sentence summary of what's shifting and why now
+- Map the full value chain — break it into 3-6 layers (e.g., Generation, Transmission, Cooling, Compute) and list 2-4 representative tickers per layer
+- Pick 3-5 highest-conviction tickers across the chain (mix of obvious leaders and sleeper picks-and-shovels)
+- List 2-4 dated catalysts that would accelerate the theme
+- List 2-4 risks / what would invalidate it
+- Cite 2-4 specific recent headlines that triggered this theme
+- Suggest a "intel body" text — a paragraph the user can save to the intelligence layer for future scans to leverage
+
+Surface 4-7 themes. Avoid generic bucket themes like "AI" or "Energy" — they need to be specific (e.g., "Liquid cooling for AI fabs", "Sovereign LLM build-outs in EU", "GLP-1 supply bottleneck shift to oral formulations"). De-duplicate from themes already represented in the user's intel. Output STRICT JSON only.`,
 }
 
 const PICKS_SCHEMA = `{
@@ -103,6 +117,28 @@ const PICKS_SCHEMA = `{
         "maxLoss": "premium paid",
         "rationale": "..."
       }
+    }
+  ]
+}`
+
+const THEMES_SCHEMA = `{
+  "summary": "2-3 sentence read of where the market's narrative is shifting",
+  "picks": [
+    {
+      "theme": "Liquid cooling for AI fabs",
+      "type": "theme",
+      "conviction": 8,
+      "summary": "Why this is emerging now (2-3 sentences)",
+      "valueChain": [
+        { "layer": "Cold plates / loops", "tickers": ["VRT","MOD"] },
+        { "layer": "Refrigerants / fluids", "tickers": ["HON","CE"] },
+        { "layer": "Power", "tickers": ["ETN","GEV"] }
+      ],
+      "topPicks": ["VRT","MOD","ETN"],
+      "catalysts": ["NVDA earnings 2026-02-25 commentary on liquid-cooled SKUs", "..."],
+      "risks": ["Air-cooled efficiency gains close the gap", "..."],
+      "newsHeadlines": ["[2026-04-28] Vertiv guides ...", "..."],
+      "suggestedIntelBody": "Markdown text to save to the intelligence layer so future scans pick this up..."
     }
   ]
 }`
@@ -276,6 +312,15 @@ async function buildPrompt(mode, payload, intel) {
     return `Today: ${today}\n\n${liveBlock(ctx)}\n\nWatchlist: ${payload.watchlist?.length ? payload.watchlist.join(', ') : '(use intel + market)'}\nCapital: ${payload.capital || 'unspecified'}\nRisk: ${payload.risk || 'defined-risk preferred'}\nStrategies: ${payload.strategies?.length ? payload.strategies.join(', ') : 'any'}\nHorizon: ${payload.horizon || 'any'}\nBias: ${payload.bias || 'neutral'}\nNotes: ${payload.notes || 'none'}\n\n## Intelligence layer:\n${intelText}\n\nReturn STRICT JSON matching:\n${PICKS_SCHEMA}`
   }
 
+  if (mode === 'themes') {
+    const ctx = await gatherLiveContext({
+      tickers: uniqTickers(intelTickers).slice(0, 15),
+      includeNews: true,
+      marketNewsCategory: 'general',
+    })
+    return `Today: ${today}\n\n${liveBlock(ctx)}\n\n## Existing intelligence layer (de-duplicate from these):\n${intelText}\n\nProduce 4-7 distinct emerging themes as described in your system instructions. Each must include a value-chain breakdown and a suggestedIntelBody.\n\nReturn STRICT JSON matching:\n${THEMES_SCHEMA}`
+  }
+
   if (mode === 'consensus') {
     const exclude = new Set((payload.exclude || []).map((s) => s.toUpperCase()))
     const universe = uniqTickers(intelTickers, DEFAULT_UNIVERSE).filter((t) => !exclude.has(t)).slice(0, 25)
@@ -354,10 +399,19 @@ export async function POST(req) {
     try { parsed = extractJson(text) }
     catch { return Response.json({ error: 'Model did not return valid JSON', raw: text }, { status: 502 }) }
 
+    const fallbackType = {
+      options: 'options',
+      sleepers: 'sleeper',
+      hidden_gems: 'hidden_gem',
+      undervalued: 'undervalued',
+      themes: 'theme',
+      top_picks: 'top_pick',
+      consensus: 'momentum',
+    }[mode] || 'undervalued'
     const picks = (parsed.picks || []).map((p) => ({
       id: crypto.randomUUID(),
       ...p,
-      type: p.type || (mode === 'options' ? 'options' : mode === 'sleepers' ? 'sleeper' : mode === 'hidden_gems' ? 'hidden_gem' : 'undervalued'),
+      type: p.type || fallbackType,
     }))
 
     const result = {
