@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useState, useCallback } from 'react'
+import { apiFetch } from '../lib/api'
 
 export default function LivePanel({ tickers }) {
   const [snaps, setSnaps] = useState([])
@@ -16,7 +17,7 @@ export default function LivePanel({ tickers }) {
     setError('')
     try {
       const url = `/api/market?action=snapshotMany&symbols=${encodeURIComponent(tickers.join(','))}`
-      const res = await fetch(url)
+      const res = await apiFetch(url)
       const data = await res.json()
       if (!res.ok) throw new Error(data.error || 'Failed')
       setSnaps(data.data || [])

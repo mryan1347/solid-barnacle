@@ -1,41 +1,42 @@
 // Daily pre-market scanner warm-up. Triggered by Vercel cron at 13:00 UTC
 // (~8am ET, before US market open) Mon-Fri.
 //
-// What it does:
-//   1. Seeds the intel layer with starter themes if it's empty.
-//   2. Re-runs every default scanner with fresh=true so the first user
-//      of the day gets cached results in <100ms.
-//
-// Cost (current model + Finnhub free tier):
-//   ~$0.20 / day on Anthropic, ~$6 / month. Vercel cron itself is free
-//   on Hobby (up to 2 cron jobs).
-//
-// Auth: Vercel automatically attaches the CRON_SECRET as a Bearer header
-// when invoking. Reject anything without it in production.
+// Auth: in production, requires either CRON_SECRET (Vercel cron sets this
+// automatically) or APP_PASSWORD. Fails closed by default in production —
+// no quiet fallback that lets a public hit drain the wallet.
 
 import { listAll } from '../../../lib/store'
+import { isCronAuthorized } from '../../../lib/auth'
 
 export const runtime = 'nodejs'
 export const maxDuration = 300
 
 const SCANNERS = ['top_picks', 'hidden_gems', 'undervalued', 'sleepers', 'consensus', 'themes']
 
-function authorized(req) {
-  if (!process.env.CRON_SECRET) return true
-  const auth = req.headers.get('authorization') || ''
-  return auth === `Bearer ${process.env.CRON_SECRET}`
+function authHeaders() {
+  const h = { 'Content-Type': 'application/json' }
+  if (process.env.APP_PASSWORD) h['x-app-password'] = process.env.APP_PASSWORD
+  return h
 }
 
 async function seedIfEmpty(origin) {
   const items = await listAll('intel:v1')
   if (items.length > 0) return { seeded: false, count: items.length }
-  const res = await fetch(`${origin}/api/intel/seed`, { method: 'POST' })
+  const res = await fetch(`${origin}/api/intel/seed`, { method: 'POST', headers: authHeaders() })
   const data = await res.json().catch(() => ({}))
   return { seeded: true, ...data }
 }
 
 export async function GET(req) {
-  if (!authorized(req)) return Response.json({ error: 'unauthorized' }, { status: 401 })
+  // Fail closed in production unless properly authorized.
+  const inProd = (process.env.VERCEL_ENV || '') === 'production'
+  if (!isCronAuthorized(req)) {
+    if (inProd) return Response.json({ error: 'unauthorized' }, { status: 401 })
+    if (process.env.CRON_SECRET || process.env.APP_PASSWORD) {
+      return Response.json({ error: 'unauthorized' }, { status: 401 })
+    }
+    // Dev mode with no secrets configured — allow.
+  }
 
   const url = new URL(req.url)
   const origin = `${url.protocol}//${url.host}`
@@ -48,7 +49,7 @@ export async function GET(req) {
     try {
       const res = await fetch(`${origin}/api/analyze`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders(),
         body: JSON.stringify({ mode, fresh: true }),
       })
       const data = await res.json()

@@ -1,6 +1,7 @@
 'use client'
 
 import { useState } from 'react'
+import { apiFetch } from '../lib/api'
 
 export default function ThemeCard({ theme, onAddedToIntel }) {
   const [adding, setAdding] = useState(false)
@@ -17,7 +18,7 @@ export default function ThemeCard({ theme, onAddedToIntel }) {
     setAdding(true); setErr('')
     try {
       const body = theme.suggestedIntelBody || `${theme.theme}\n\n${theme.summary || ''}`
-      const res = await fetch('/api/intel', {
+      const res = await apiFetch('/api/intel', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

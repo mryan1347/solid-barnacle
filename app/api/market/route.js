@@ -11,11 +11,13 @@ import {
   snapshot,
   snapshotMany,
 } from '../../lib/marketData'
+import { isAuthorized, unauthorized } from '../../lib/auth'
 
 export const runtime = 'nodejs'
 export const maxDuration = 30
 
 export async function GET(req) {
+  if (!isAuthorized(req)) return unauthorized()
   const { searchParams } = new URL(req.url)
   const action = searchParams.get('action') || 'snapshot'
   const symbol = searchParams.get('symbol') || ''

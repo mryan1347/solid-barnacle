@@ -7,6 +7,7 @@ import {
 } from '../../lib/marketData'
 import { listAll } from '../../lib/store'
 import { get as cacheGet, set as cacheSet } from '../../lib/store'
+import { isAuthorized, unauthorized } from '../../lib/auth'
 
 export const runtime = 'nodejs'
 export const maxDuration = 60
@@ -360,6 +361,7 @@ function intelDigest(intel) {
 }
 
 export async function POST(req) {
+  if (!isAuthorized(req)) return unauthorized()
   if (!process.env.ANTHROPIC_API_KEY) {
     return Response.json({
       error: `ANTHROPIC_API_KEY not present in ${process.env.VERCEL_ENV || 'this'} runtime. Verify the env var is named exactly ANTHROPIC_API_KEY (not AMTHROPIC_API_KEY) and that the Production scope is ticked.`,

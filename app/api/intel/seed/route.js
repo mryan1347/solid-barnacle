@@ -8,6 +8,7 @@
 //   - From a future "Sync seeds" button (POST)
 
 import { listAdd, listAll } from '../../../lib/store'
+import { isAuthorized, unauthorized } from '../../../lib/auth'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -80,12 +81,14 @@ async function applySeeds() {
   return { added, skipped, totalSeeds: SEEDS.length, layerSize: existing.length + added.length }
 }
 
-export async function GET() {
+export async function GET(req) {
+  if (!isAuthorized(req)) return unauthorized()
   const result = await applySeeds()
   return Response.json(result)
 }
 
-export async function POST() {
+export async function POST(req) {
+  if (!isAuthorized(req)) return unauthorized()
   const result = await applySeeds()
   return Response.json(result)
 }

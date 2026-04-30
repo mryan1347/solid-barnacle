@@ -8,6 +8,8 @@ import ConsensusScanner from './components/ConsensusScanner'
 import LivePanel from './components/LivePanel'
 import StatusDots from './components/StatusDots'
 import ThemeCard from './components/ThemeCard'
+import Lock from './components/Lock'
+import { apiFetch } from './lib/api'
 
 const SCANNERS = [
   { key: 'top_picks', label: 'Top Picks', auto: true },
@@ -46,7 +48,7 @@ export default function Home() {
 
   const refreshIntel = useCallback(async () => {
     try {
-      const res = await fetch('/api/intel')
+      const res = await apiFetch('/api/intel')
       const data = await res.json()
       if (res.ok) setIntel(data.items || [])
     } catch {}
@@ -58,7 +60,7 @@ export default function Home() {
     setBusy((b) => ({ ...b, [mode]: true }))
     setErrors((e) => ({ ...e, [mode]: '' }))
     try {
-      const res = await fetch('/api/analyze', {
+      const res = await apiFetch('/api/analyze', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ mode, payload, fresh }),
@@ -75,16 +77,18 @@ export default function Home() {
     }
   }, [])
 
-  // Auto-load every default scanner on mount (server-side cache makes this cheap).
+  // Lazy-load: only the active tab autoloads on mount or tab switch. This
+  // avoids burning the Anthropic budget on a cold cache (6 simultaneous
+  // scans = $1-2). Server-side cache makes the scan cheap on repeat hits.
   useEffect(() => {
     if (!hydrated) return
-    for (const s of SCANNERS) {
-      if (!s.auto) continue
-      if (results[s.key]?.picks?.length) continue
-      runScan(s.key)
-    }
+    const s = SCANNERS.find((x) => x.key === tab)
+    if (!s?.auto) return
+    if (results[tab]?.picks?.length) return
+    if (busy[tab]) return
+    runScan(tab)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hydrated])
+  }, [hydrated, tab])
 
   const trackedTickers = useMemo(() => {
     const set = new Set()
@@ -103,6 +107,7 @@ export default function Home() {
   const meta = SCANNERS.find((s) => s.key === tab)
 
   return (
+    <Lock>
     <div className="shell shell-mobile">
       <header className="topbar">
         <div className="topbar-left">
@@ -328,5 +333,6 @@ export default function Home() {
         }
       `}</style>
     </div>
+    </Lock>
   )
 }

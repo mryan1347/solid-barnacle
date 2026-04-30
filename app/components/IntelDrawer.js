@@ -1,6 +1,7 @@
 'use client'
 
 import { useState, useEffect } from 'react'
+import { apiFetch } from '../lib/api'
 
 const KINDS = [
   { value: 'note', label: 'Note' },
@@ -47,7 +48,7 @@ export default function IntelDrawer({ intel, onClose, onChange }) {
       .map((t) => t.replace(/[^A-Z0-9.\-]/g, ''))
       .filter(Boolean)
     try {
-      const res = await fetch('/api/intel', {
+      const res = await apiFetch('/api/intel', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -71,7 +72,7 @@ export default function IntelDrawer({ intel, onClose, onChange }) {
 
   const remove = async (id) => {
     try {
-      const res = await fetch(`/api/intel?id=${encodeURIComponent(id)}`, { method: 'DELETE' })
+      const res = await apiFetch(`/api/intel?id=${encodeURIComponent(id)}`, { method: 'DELETE' })
       if (res.ok) onChange?.()
     } catch {}
   }
@@ -79,7 +80,7 @@ export default function IntelDrawer({ intel, onClose, onChange }) {
   const clearAll = async () => {
     if (!confirm(`Delete all ${intel.length} intel items?`)) return
     try {
-      const res = await fetch('/api/intel?all=1', { method: 'DELETE' })
+      const res = await apiFetch('/api/intel?all=1', { method: 'DELETE' })
       if (res.ok) onChange?.()
     } catch {}
   }
