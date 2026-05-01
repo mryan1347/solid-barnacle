@@ -2,6 +2,8 @@
 
 import { useState } from 'react'
 import { apiFetch } from '../lib/api'
+import VoiceButton from './VoiceButton'
+import { themeScript } from '../lib/voice'
 
 export default function ThemeCard({ theme, onAddedToIntel }) {
   const [adding, setAdding] = useState(false)
@@ -47,12 +49,15 @@ export default function ThemeCard({ theme, onAddedToIntel }) {
           <h3>{theme.theme}</h3>
           {theme.summary && <p>{theme.summary}</p>}
         </div>
-        <div className="conviction" title="AI conviction">
-          <span>conv</span>
-          <div className="conviction-bar">
-            <div className="conviction-fill" style={{ width: `${(conv / 10) * 100}%` }} />
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          <VoiceButton text={themeScript(theme)} label="Listen" size="sm" />
+          <div className="conviction" title="AI conviction">
+            <span>conv</span>
+            <div className="conviction-bar">
+              <div className="conviction-fill" style={{ width: `${(conv / 10) * 100}%` }} />
+            </div>
+            <span className="conviction-num">{conv.toFixed(1)}</span>
           </div>
-          <span className="conviction-num">{conv.toFixed(1)}</span>
         </div>
       </header>
 

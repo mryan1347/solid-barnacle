@@ -1,5 +1,8 @@
 'use client'
 
+import VoiceButton from './VoiceButton'
+import { pickScript } from '../lib/voice'
+
 const TYPE_LABEL = {
   undervalued: 'Undervalued',
   hidden_gem: 'Hidden Gem',
@@ -7,6 +10,8 @@ const TYPE_LABEL = {
   momentum: 'Momentum',
   contrarian: 'Contrarian',
   short: 'Short',
+  sleeper: 'Sleeper',
+  top_pick: 'Top Pick',
 }
 
 export default function PickCard({ pick }) {
@@ -23,14 +28,20 @@ export default function PickCard({ pick }) {
             {pick.sector && <span className="tag">{pick.sector}</span>}
           </div>
         </div>
-        <div className="conviction" title="AI conviction score">
-          <span>conv</span>
-          <div className="conviction-bar">
-            <div className="conviction-fill" style={{ width: `${(c / 10) * 100}%` }} />
+        <div className="pick-head-right">
+          <VoiceButton text={pickScript(pick)} label="Listen" size="sm" />
+          <div className="conviction" title="AI conviction score">
+            <span>conv</span>
+            <div className="conviction-bar">
+              <div className="conviction-fill" style={{ width: `${(c / 10) * 100}%` }} />
+            </div>
+            <span className="conviction-num">{c.toFixed(1)}</span>
           </div>
-          <span className="conviction-num">{c.toFixed(1)}</span>
         </div>
       </header>
+      <style jsx>{`
+        .pick-head-right { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+      `}</style>
 
       <div className="pick-body">
         {pick.option && (

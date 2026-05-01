@@ -1,7 +1,8 @@
 'use client'
 
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useEffect, useRef } from 'react'
 import PickCard from './PickCard'
+import { speakSequence, cancel as cancelVoice, isSupported as voiceSupported, pickScript } from '../lib/voice'
 
 const FILTERS = [
   { key: 'all', label: 'All' },
@@ -15,11 +16,36 @@ const FILTERS = [
 
 export default function PicksFeed({ picks, summary, generatedAt }) {
   const [filter, setFilter] = useState('all')
+  const [playing, setPlaying] = useState(false)
+  const [progress, setProgress] = useState({ idx: 0, total: 0 })
+  const stopRef = useRef(null)
 
   const filtered = useMemo(() => {
     const list = filter === 'all' ? picks : picks.filter((p) => p.type === filter)
     return [...list].sort((a, b) => (b.conviction || 0) - (a.conviction || 0))
   }, [picks, filter])
+
+  useEffect(() => () => { if (stopRef.current) stopRef.current() }, [])
+
+  const playAll = () => {
+    if (playing) {
+      stopRef.current?.()
+      stopRef.current = null
+      setPlaying(false)
+      return
+    }
+    if (!voiceSupported() || !filtered.length) return
+    setPlaying(true)
+    setProgress({ idx: 0, total: filtered.length })
+    const stop = speakSequence(
+      filtered.map((p) => pickScript(p)),
+      {
+        onProgress: (i, total) => setProgress({ idx: i + 1, total }),
+        onDone: () => { setPlaying(false); stopRef.current = null },
+      },
+    )
+    stopRef.current = stop
+  }
 
   if (!picks?.length) {
     return (
@@ -40,7 +66,7 @@ export default function PicksFeed({ picks, summary, generatedAt }) {
         </div>
       )}
 
-      <div className="filter-bar">
+      <div className="filter-bar" style={{ alignItems: 'center' }}>
         {FILTERS.map((f) => {
           const count = f.key === 'all' ? picks.length : picks.filter((p) => p.type === f.key).length
           if (f.key !== 'all' && count === 0) return null
@@ -55,6 +81,19 @@ export default function PicksFeed({ picks, summary, generatedAt }) {
             </button>
           )
         })}
+        {voiceSupported() && filtered.length > 0 && (
+          <button
+            type="button"
+            className={`filter-pill ${playing ? 'active' : ''}`}
+            onClick={playAll}
+            style={{ marginLeft: 'auto' }}
+            aria-label={playing ? 'Stop playback' : 'Listen to all picks'}
+          >
+            {playing
+              ? `■ Stop · ${progress.idx}/${progress.total}`
+              : `▶ Play all · ${filtered.length}`}
+          </button>
+        )}
       </div>
 
       <div className="picks">
