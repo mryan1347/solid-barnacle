@@ -24,6 +24,14 @@ const SCANNERS = [
 const RESULT_CACHE_KEY = 'intel-desk-results-v2'
 const STALE_AFTER_MS = 6 * 60 * 60 * 1000 // 6 hours — beyond this auto-refresh on mount
 
+function timeAgoShort(ts) {
+  const s = Math.floor((Date.now() - ts) / 1000)
+  if (s < 60) return `${s}s ago`
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`
+  return `${Math.floor(s / 86400)}d ago`
+}
+
 export default function Home() {
   const [results, setResults] = useState({})
   const [busy, setBusy] = useState({})
@@ -127,8 +135,9 @@ export default function Home() {
             onClick={() => runScan(tab, {}, true)}
             disabled={busy[tab]}
             title="Refresh this scanner with fresh data"
+            aria-label={busy[tab] ? 'Scanning' : 'Refresh'}
           >
-            {busy[tab] ? '↻…' : '↻'}
+            {busy[tab] ? <><span className="spinner" />…</> : '↻'}
           </button>
           <button className="btn btn-primary" onClick={() => setDrawerOpen(true)}>
             Intel · {intel.length}
@@ -176,6 +185,19 @@ export default function Home() {
         ) : null}
 
         {errors[tab] && <div className="banner error">⚠ {errors[tab]}</div>}
+
+        {busy[tab] && current?.picks?.length > 0 && (
+          <div className="banner scanning">
+            <span className="spinner" />
+            Refreshing {meta?.label.toLowerCase()}… picks below are from the previous scan.
+          </div>
+        )}
+
+        {current?.generatedAt && current?.picks?.length > 0 && !busy[tab] && (
+          <div className="meta-line" style={{ marginTop: 0, marginBottom: 12, textAlign: 'left' }}>
+            Updated {timeAgoShort(current.generatedAt)} · {current.picks.length} picks · {current.cached ? 'cached' : 'fresh'}
+          </div>
+        )}
 
         {busy[tab] && !current?.picks?.length ? (
           <div className="empty"><span className="spinner" />Scanning {meta?.label.toLowerCase()}…</div>
@@ -331,6 +353,23 @@ export default function Home() {
           color: var(--text-faint);
           font-size: 11px;
           text-align: center;
+        }
+        .banner.scanning {
+          background: rgba(52,211,153,0.08);
+          border: 1px solid var(--accent-dim);
+          color: var(--accent);
+          padding: 10px 14px;
+          border-radius: 8px;
+          font-size: 12.5px;
+          margin-bottom: 12px;
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          animation: scanpulse 2s ease-in-out infinite;
+        }
+        @keyframes scanpulse {
+          0%, 100% { background: rgba(52,211,153,0.08); }
+          50% { background: rgba(52,211,153,0.16); }
         }
         @media (min-width: 720px) {
           .main-mobile { padding: 24px 28px 40px; }
