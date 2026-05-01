@@ -28,14 +28,13 @@ async function seedIfEmpty(origin) {
 }
 
 export async function GET(req) {
-  // Fail closed in production unless properly authorized.
-  const inProd = (process.env.VERCEL_ENV || '') === 'production'
-  if (!isCronAuthorized(req)) {
-    if (inProd) return Response.json({ error: 'unauthorized' }, { status: 401 })
-    if (process.env.CRON_SECRET || process.env.APP_PASSWORD) {
-      return Response.json({ error: 'unauthorized' }, { status: 401 })
-    }
-    // Dev mode with no secrets configured — allow.
+  // Only enforce auth when at least one secret is configured. If neither
+  // CRON_SECRET nor APP_PASSWORD is set, the route is open (same posture
+  // as the rest of the app in unsecured mode). Vercel cron only attaches
+  // the Bearer header when CRON_SECRET is set, so requiring it
+  // unconditionally would 401 every legitimate cron call.
+  if ((process.env.CRON_SECRET || process.env.APP_PASSWORD) && !isCronAuthorized(req)) {
+    return Response.json({ error: 'unauthorized' }, { status: 401 })
   }
 
   const url = new URL(req.url)

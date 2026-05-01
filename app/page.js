@@ -22,6 +22,7 @@ const SCANNERS = [
 ]
 
 const RESULT_CACHE_KEY = 'intel-desk-results-v2'
+const STALE_AFTER_MS = 6 * 60 * 60 * 1000 // 6 hours — beyond this auto-refresh on mount
 
 export default function Home() {
   const [results, setResults] = useState({})
@@ -77,16 +78,19 @@ export default function Home() {
     }
   }, [])
 
-  // Lazy-load: only the active tab autoloads on mount or tab switch. This
-  // avoids burning the Anthropic budget on a cold cache (6 simultaneous
-  // scans = $1-2). Server-side cache makes the scan cheap on repeat hits.
+  // Lazy-load: only the active tab autoloads on mount or tab switch. Picks
+  // are AI opinions, not market data — server-side cache keeps repeat hits
+  // cheap. We DO auto-refresh when the local cache is older than 6 hours
+  // so users don't see day-old data after a cold reload.
   useEffect(() => {
     if (!hydrated) return
     const s = SCANNERS.find((x) => x.key === tab)
     if (!s?.auto) return
-    if (results[tab]?.picks?.length) return
     if (busy[tab]) return
-    runScan(tab)
+    const r = results[tab]
+    const stale = r?.generatedAt && Date.now() - r.generatedAt > STALE_AFTER_MS
+    if (r?.picks?.length && !stale) return
+    runScan(tab, {}, stale) // fresh=true if stale
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hydrated, tab])
 

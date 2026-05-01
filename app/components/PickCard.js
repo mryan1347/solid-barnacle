@@ -16,13 +16,24 @@ const TYPE_LABEL = {
   top_pick: 'Top Pick',
 }
 
-export default function PickCard({ pick }) {
+export default function PickCard({ pick, liveQuote }) {
   const c = Math.max(0, Math.min(10, Number(pick.conviction) || 0))
+  const pct = liveQuote?.pctChange
+  const pxColor = pct == null ? 'var(--text-faint)' : pct > 0 ? 'var(--accent)' : pct < 0 ? 'var(--danger)' : 'var(--text-dim)'
   return (
     <article className="pick">
       <header className="pick-head">
         <div className="pick-id">
           <span className="pick-ticker">${pick.ticker}</span>
+          {liveQuote?.price != null && (
+            <span className="live-px" title="Live price (refreshes every 60s)">
+              ${liveQuote.price.toFixed(2)}
+              <span style={{ color: pxColor, marginLeft: 4 }}>
+                {pct == null ? '' : `${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%`}
+              </span>
+              <span className="live-pulse" />
+            </span>
+          )}
           {pick.company && <span className="pick-company">{pick.company}</span>}
           <div className="pick-tags">
             <span className={`tag type-${pick.type}`}>{TYPE_LABEL[pick.type] || pick.type}</span>
@@ -44,6 +55,33 @@ export default function PickCard({ pick }) {
       </header>
       <style jsx>{`
         .pick-head-right { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+        .live-px {
+          font-family: var(--mono);
+          font-size: 13px;
+          font-weight: 600;
+          color: var(--text);
+          background: var(--bg-elev-2);
+          border: 1px solid var(--border);
+          border-radius: 5px;
+          padding: 2px 7px;
+          display: inline-flex;
+          align-items: center;
+          gap: 4px;
+          line-height: 1.3;
+        }
+        .live-pulse {
+          width: 6px;
+          height: 6px;
+          border-radius: 50%;
+          background: var(--accent);
+          box-shadow: 0 0 6px var(--accent);
+          animation: pulse 1.6s ease-in-out infinite;
+          margin-left: 4px;
+        }
+        @keyframes pulse {
+          0%, 100% { opacity: 1; transform: scale(1); }
+          50% { opacity: 0.4; transform: scale(0.85); }
+        }
       `}</style>
 
       <div className="pick-body">

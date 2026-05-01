@@ -3,6 +3,7 @@
 import { useState, useMemo, useEffect, useRef } from 'react'
 import PickCard from './PickCard'
 import { speakSequence, cancel as cancelVoice, isSupported as voiceSupported, pickScript } from '../lib/voice'
+import { useLivePrices } from '../lib/livePrices'
 
 const FILTERS = [
   { key: 'all', label: 'All' },
@@ -24,6 +25,12 @@ export default function PicksFeed({ picks, summary, generatedAt }) {
     const list = filter === 'all' ? picks : picks.filter((p) => p.type === filter)
     return [...list].sort((a, b) => (b.conviction || 0) - (a.conviction || 0))
   }, [picks, filter])
+
+  const tickers = useMemo(
+    () => [...new Set(picks.map((p) => p.ticker).filter(Boolean))],
+    [picks],
+  )
+  const livePrices = useLivePrices(tickers)
 
   useEffect(() => () => { if (stopRef.current) stopRef.current() }, [])
 
@@ -97,7 +104,9 @@ export default function PicksFeed({ picks, summary, generatedAt }) {
       </div>
 
       <div className="picks">
-        {filtered.map((p, i) => <PickCard key={p.id || i} pick={p} />)}
+        {filtered.map((p, i) => (
+          <PickCard key={p.id || i} pick={p} liveQuote={livePrices[p.ticker]} />
+        ))}
       </div>
     </div>
   )
