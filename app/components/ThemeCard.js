@@ -3,7 +3,9 @@
 import { useState } from 'react'
 import { apiFetch } from '../lib/api'
 import VoiceButton from './VoiceButton'
+import AskClaudeButton from './AskClaudeButton'
 import { themeScript } from '../lib/voice'
+import { themePrompt } from '../lib/prompts'
 
 export default function ThemeCard({ theme, onAddedToIntel }) {
   const [adding, setAdding] = useState(false)
@@ -50,6 +52,7 @@ export default function ThemeCard({ theme, onAddedToIntel }) {
           {theme.summary && <p>{theme.summary}</p>}
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          <AskClaudeButton prompt={themePrompt(theme)} label="Ask Claude" size="sm" />
           <VoiceButton text={themeScript(theme)} label="Listen" size="sm" />
           <div className="conviction" title="AI conviction">
             <span>conv</span>

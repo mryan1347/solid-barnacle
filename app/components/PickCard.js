@@ -1,7 +1,9 @@
 'use client'
 
 import VoiceButton from './VoiceButton'
+import AskClaudeButton from './AskClaudeButton'
 import { pickScript } from '../lib/voice'
+import { pickPrompt } from '../lib/prompts'
 
 const TYPE_LABEL = {
   undervalued: 'Undervalued',
@@ -29,6 +31,7 @@ export default function PickCard({ pick }) {
           </div>
         </div>
         <div className="pick-head-right">
+          <AskClaudeButton prompt={pickPrompt(pick)} label="Ask Claude" size="sm" />
           <VoiceButton text={pickScript(pick)} label="Listen" size="sm" />
           <div className="conviction" title="AI conviction score">
             <span>conv</span>
