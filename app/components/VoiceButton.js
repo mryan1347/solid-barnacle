@@ -3,28 +3,44 @@
 import { useEffect, useRef, useState } from 'react'
 import { speak, cancel, isSupported } from '../lib/voice'
 
-export default function VoiceButton({ text, label = 'Listen', size = 'md', stopOnUnmount = true }) {
+export default function VoiceButton({ text, label = 'Listen', size = 'md' }) {
   const [playing, setPlaying] = useState(false)
-  const utterRef = useRef(null)
+  const [loading, setLoading] = useState(false)
+  const playingRef = useRef(false)
 
   useEffect(() => {
-    return () => { if (stopOnUnmount && utterRef.current) cancel() }
-  }, [stopOnUnmount])
+    return () => { if (playingRef.current) cancel() }
+  }, [])
 
-  if (!isSupported()) return null
+  if (!isSupported() && typeof window !== 'undefined' && !('speechSynthesis' in window)) {
+    return null
+  }
 
-  const onClick = (e) => {
+  const onClick = async (e) => {
     e?.stopPropagation?.()
-    if (playing) {
+    if (playing || loading) {
       cancel()
       setPlaying(false)
-      utterRef.current = null
+      setLoading(false)
+      playingRef.current = false
       return
     }
-    const u = speak(text, { onEnd: () => { setPlaying(false); utterRef.current = null } })
-    if (!u) return
-    utterRef.current = u
-    setPlaying(true)
+    setLoading(true)
+    try {
+      await speak(text, {
+        onEnd: () => {
+          setPlaying(false)
+          setLoading(false)
+          playingRef.current = false
+        },
+      })
+      setPlaying(true)
+      playingRef.current = true
+    } catch {
+      setPlaying(false)
+    } finally {
+      setLoading(false)
+    }
   }
 
   const styles = size === 'sm'
@@ -39,7 +55,7 @@ export default function VoiceButton({ text, label = 'Listen', size = 'md', stopO
       aria-label={playing ? 'Stop voice playback' : label}
       style={styles}
     >
-      {playing ? '■ Stop' : `▶ ${label}`}
+      {loading ? '… loading' : playing ? '■ Stop' : `▶ ${label}`}
     </button>
   )
 }

@@ -1,28 +1,52 @@
 'use client'
 
-// Web Speech API wrapper. Uses the device's system voices — free,
-// no API call, works on iOS Safari with high-quality voices.
+import { apiFetch } from './api'
+
+// Two-tier TTS:
+//   1. Studio (ElevenLabs / OpenAI) when configured server-side — fetches MP3
+//      via /api/tts and plays through an Audio element.
+//   2. System (Web Speech API) as fallback — runs entirely on-device.
+//
+// `speak(text)` and `speakSequence([texts])` pick the best available tier
+// transparently. Caller doesn't need to know which one is running.
+
+let studioMode = null // null | true | false (lazy probed)
+let studioMeta = null // { provider, elevenVoiceId, ... } from /api/tts GET
+let queueId = 0
+let currentSystemUtter = null
+let currentStudioAudio = null
+
+function isBrowser() { return typeof window !== 'undefined' }
 
 export function isSupported() {
-  return typeof window !== 'undefined' && 'speechSynthesis' in window
+  if (!isBrowser()) return false
+  return studioMode === true || ('speechSynthesis' in window)
 }
 
-let queueId = 0
-
-export function cancel() {
-  if (!isSupported()) return
-  queueId++ // invalidate any in-flight queue
-  window.speechSynthesis.cancel()
+async function probeStudio() {
+  if (studioMode !== null) return studioMode
+  try {
+    const res = await fetch('/api/tts')
+    const d = await res.json()
+    studioMode = Boolean(d.provider)
+    studioMeta = d
+  } catch {
+    studioMode = false
+  }
+  return studioMode
 }
 
-function pickVoice() {
+export async function getProvider() {
+  await probeStudio()
+  if (studioMode) return studioMeta?.provider || 'studio'
+  if (isBrowser() && 'speechSynthesis' in window) return 'system'
+  return null
+}
+
+// ---- system voice (fallback) ----
+function pickSystemVoice() {
   const voices = window.speechSynthesis.getVoices() || []
-  // Prefer high-quality English voices that exist on iOS / macOS / Android / Win
-  const preferred = [
-    'Samantha', 'Alex', 'Karen', 'Daniel',
-    'Google US English', 'Google UK English Female',
-    'Microsoft Aria', 'Microsoft Jenny', 'Microsoft Guy',
-  ]
+  const preferred = ['Samantha', 'Alex', 'Karen', 'Daniel', 'Google US English', 'Microsoft Aria', 'Microsoft Jenny']
   for (const name of preferred) {
     const v = voices.find((x) => x.name?.includes(name))
     if (v) return v
@@ -30,54 +54,133 @@ function pickVoice() {
   return voices.find((v) => v.lang?.startsWith('en')) || null
 }
 
-function utterance(text) {
+function buildSystemUtter(text) {
   const u = new SpeechSynthesisUtterance(text)
-  u.rate = 1.05
-  u.pitch = 1.0
-  u.volume = 1.0
-  const v = pickVoice()
+  u.rate = 1.05; u.pitch = 1.0; u.volume = 1.0
+  const v = pickSystemVoice()
   if (v) u.voice = v
   return u
 }
 
-export function speak(text, { onEnd } = {}) {
-  if (!isSupported() || !text) return null
-  cancel()
-  const u = utterance(text)
-  if (onEnd) {
-    u.onend = onEnd
-    u.onerror = onEnd
-  }
+function playSystem(text, onEnd) {
+  const u = buildSystemUtter(text)
+  if (onEnd) { u.onend = onEnd; u.onerror = onEnd }
+  currentSystemUtter = u
   window.speechSynthesis.speak(u)
   return u
 }
 
-// Queue multiple texts in sequence. Returns a `stop()` fn that
-// stops the current playback AND prevents queued items from starting.
-export function speakSequence(texts, { onProgress, onDone } = {}) {
-  if (!isSupported() || !texts?.length) {
-    onDone?.()
-    return () => {}
+// ---- studio (ElevenLabs / OpenAI) ----
+async function fetchStudioBlob(text) {
+  const res = await apiFetch('/api/tts', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text }),
+  })
+  if (!res.ok) {
+    let msg = `tts ${res.status}`
+    try { const j = await res.json(); if (j?.error) msg = j.error } catch {}
+    throw new Error(msg)
   }
-  cancel()
-  const myId = ++queueId
-  let i = 0
-
-  const next = () => {
-    if (queueId !== myId) return // canceled
-    if (i >= texts.length) { onDone?.(); return }
-    const idx = i++
-    onProgress?.(idx, texts.length)
-    const u = utterance(texts[idx])
-    u.onend = () => { if (queueId === myId) next() }
-    u.onerror = () => { if (queueId === myId) next() }
-    window.speechSynthesis.speak(u)
-  }
-
-  next()
-  return () => { queueId++; window.speechSynthesis.cancel() }
+  return res.blob()
 }
 
+async function playStudio(text, onEnd) {
+  const blob = await fetchStudioBlob(text)
+  const url = URL.createObjectURL(blob)
+  const audio = new Audio(url)
+  currentStudioAudio = audio
+  const cleanup = () => {
+    URL.revokeObjectURL(url)
+    if (currentStudioAudio === audio) currentStudioAudio = null
+  }
+  audio.onended = () => { cleanup(); onEnd?.() }
+  audio.onerror = () => { cleanup(); onEnd?.() }
+  await audio.play()
+  return audio
+}
+
+// ---- public API ----
+export function cancel() {
+  queueId++
+  if (isBrowser() && window.speechSynthesis) window.speechSynthesis.cancel()
+  currentSystemUtter = null
+  if (currentStudioAudio) {
+    try { currentStudioAudio.pause() } catch {}
+    currentStudioAudio = null
+  }
+}
+
+export async function speak(text, opts = {}) {
+  if (!text || !isBrowser()) return null
+  cancel()
+  const provider = await getProvider()
+  if (provider === 'elevenlabs' || provider === 'openai' || provider === 'studio') {
+    try { return await playStudio(text, opts.onEnd) }
+    catch (e) {
+      // Fallback if studio errored mid-flight.
+      if ('speechSynthesis' in window) return playSystem(text, opts.onEnd)
+      throw e
+    }
+  }
+  if (provider === 'system') return playSystem(text, opts.onEnd)
+  return null
+}
+
+// Sequence: returns a `stop()` function that cancels playback + queue.
+export function speakSequence(texts, { onProgress, onDone } = {}) {
+  if (!isBrowser() || !texts?.length) { onDone?.(); return () => {} }
+  const myId = ++queueId
+  let stopped = false
+
+  ;(async () => {
+    const provider = await getProvider()
+    if (queueId !== myId) return
+
+    const studio = provider === 'elevenlabs' || provider === 'openai' || provider === 'studio'
+
+    if (studio) {
+      // Pre-fetch one blob ahead while the previous plays — keeps audio gapless.
+      let nextBlobPromise = fetchStudioBlob(texts[0]).catch(() => null)
+      for (let i = 0; i < texts.length; i++) {
+        if (stopped || queueId !== myId) break
+        onProgress?.(i, texts.length)
+        const blob = await nextBlobPromise
+        // Kick off pre-fetch for the next one.
+        nextBlobPromise = i + 1 < texts.length
+          ? fetchStudioBlob(texts[i + 1]).catch(() => null)
+          : Promise.resolve(null)
+        if (!blob || stopped || queueId !== myId) continue
+        const url = URL.createObjectURL(blob)
+        const audio = new Audio(url)
+        currentStudioAudio = audio
+        await new Promise((resolve) => {
+          audio.onended = () => { URL.revokeObjectURL(url); resolve() }
+          audio.onerror = () => { URL.revokeObjectURL(url); resolve() }
+          audio.play().catch(resolve)
+        })
+        if (currentStudioAudio === audio) currentStudioAudio = null
+      }
+    } else if (provider === 'system') {
+      for (let i = 0; i < texts.length; i++) {
+        if (stopped || queueId !== myId) break
+        onProgress?.(i, texts.length)
+        await new Promise((resolve) => {
+          const u = buildSystemUtter(texts[i])
+          u.onend = resolve; u.onerror = resolve
+          currentSystemUtter = u
+          window.speechSynthesis.speak(u)
+        })
+      }
+    }
+
+    if (!stopped && queueId === myId) onDone?.()
+  })()
+
+  return () => { stopped = true; cancel() }
+}
+
+// ---- script builders (unchanged) ----
 function humanType(t) {
   return ({
     undervalued: 'Undervalued',
